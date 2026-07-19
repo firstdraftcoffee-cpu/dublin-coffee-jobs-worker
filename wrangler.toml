@@ -1,3 +1,10 @@
-name = "cv-review"
+ name = "cv-review"
    main = "worker.js"
    compatibility_date = "2024-01-01"
+
+   [[kv_namespaces]]
+   binding = "FDC_STORE"
+   id = "YOUR_KV_ID_HERE"
+
+   [vars]
+   SITE_URL = "https://firstdraftcoffee.net"
