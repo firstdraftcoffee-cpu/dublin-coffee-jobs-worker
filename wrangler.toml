@@ -7,5 +7,5 @@
    id = "b0c80912b53c4118a42af67a9ec29c34"
 
    [vars]
-   SITE_URL = "https://dublin-coffee-jobs-site.pages.dev""
+   SITE_URL = "https://dublin-coffee-jobs-site.pages.dev"
    ALERT_EMAIL_TO = "firstdraftcoffee@gmail.com"
