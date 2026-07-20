@@ -1,11 +1,14 @@
- name = "cv-review"
-   main = "worker.js"
-   compatibility_date = "2024-01-01"
+name = "cv-review"
+main = "worker.js"
+compatibility_date = "2024-01-01"
 
-   [[kv_namespaces]]
-   binding = "FDC_STORE"
-   id = "b0c80912b53c4118a42af67a9ec29c34"
+[[kv_namespaces]]
+binding = "FDC_STORE"
+id = "b0c80912b53c4118a42af67a9ec29c34"
 
-   [vars]
-   SITE_URL = "https://dublin-coffee-jobs-site.pages.dev"
-   ALERT_EMAIL_TO = "firstdraftcoffee@gmail.com"
+[vars]
+SITE_URL = "https://dublin-coffee-jobs-site.pages.dev"
+ALERT_EMAIL_TO = "firstdraftcoffee@gmail.com"
+
+[triggers]
+crons = ["0 * * * *"]

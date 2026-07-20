@@ -31,7 +31,7 @@
 const PRICE_IDS = {
   job_standard:       'price_1TusgiJExrSWtqFLz37CJZd2', // Standard Job Listing — €50 / 14 days
   job_featured:       'price_1Tush8JExrSWtqFLF1xMwK7J', // Featured Job Listing — €75 / 30 days
-  job_retainer:       'price_XXXXXXXXXXXXXX',           // €150/mo subscription (not built yet, phase 3)
+  job_retainer:       'price_XXXXXXXXXXXXXX',           // Monthly unlimited-posts subscription — create as a RECURRING price in Stripe and paste the ID here
   shift_need:         'price_1TusfEJExrSWtqFLReq0x3ff', // Standard Listing — €10 venue shift post / 7 days
   shift_need_urgent:  'price_1Tusg8JExrSWtqFLBMrLWFbD', // Urgent Staff Listing — €25 featured/urgent shift post
 };
@@ -94,7 +94,10 @@ Brew method: ${method}. Problem: ${issue}`;
       if (path === '/listings/create' && request.method === 'POST') {
         const body = await request.json();
         const { kind, tier, data } = body; // kind: 'job' | 'shift_need' | 'shift_available'
-        if (!kind || !data) return jsonResponse({ error: 'Missing kind or data' }, 400, ALLOWED_ORIGIN);
+        if (!data || !kind) return jsonResponse({ error: 'Missing kind or data' }, 400, ALLOWED_ORIGIN);
+        if (kind === 'job' && (!data.salary || !String(data.salary).trim())) {
+          return jsonResponse({ error: 'A salary range is required for job listings' }, 400, ALLOWED_ORIGIN);
+        }
 
         const id = crypto.randomUUID();
         const record = {
@@ -108,8 +111,22 @@ Brew method: ${method}. Problem: ${issue}`;
         if (kind === 'shift_available') {
           record.status = 'published';
           const ttl = 14 * 24 * 60 * 60; // 14 days
+          record.expiresAt = Date.now() + ttl * 1000;
           await env.FDC_STORE.put(`listing:${id}`, JSON.stringify(record), { expirationTtl: ttl });
           return jsonResponse({ published: true, id }, 200, ALLOWED_ORIGIN);
+        }
+
+        // Free path: active subscriber posting a job — skip Stripe entirely
+        if (kind === 'job' && data.email) {
+          const subscribed = await hasActiveSubscription(data.email, env);
+          if (subscribed) {
+            record.status = 'published';
+            record.tier = 'subscriber';
+            const ttl = 30 * 24 * 60 * 60; // 30 days, repost any time while subscribed
+            record.expiresAt = Date.now() + ttl * 1000;
+            await env.FDC_STORE.put(`listing:${id}`, JSON.stringify(record), { expirationTtl: ttl });
+            return jsonResponse({ published: true, id }, 200, ALLOWED_ORIGIN);
+          }
         }
 
         // Paid path: job listings + venue shift-need posts
@@ -127,6 +144,31 @@ Brew method: ${method}. Problem: ${issue}`;
           cancelUrl: `${env.SITE_URL}/posted?cancelled=1`,
         }, env);
 
+        return jsonResponse({ checkoutUrl: session.url }, 200, ALLOWED_ORIGIN);
+      }
+
+      // ── NEW: SUBSCRIBE — unlimited job posts for a flat monthly price ──
+      if (path === '/subscribe/create' && request.method === 'POST') {
+        const { email } = await request.json();
+        if (!email) return jsonResponse({ error: 'Email is required' }, 400, ALLOWED_ORIGIN);
+        const priceId = PRICE_IDS.job_retainer;
+        if (!priceId) return jsonResponse({ error: 'Subscription not configured yet' }, 400, ALLOWED_ORIGIN);
+
+        const params = new URLSearchParams();
+        params.append('mode', 'subscription');
+        params.append('customer_email', email);
+        params.append('line_items[0][price]', priceId);
+        params.append('line_items[0][quantity]', '1');
+        params.append('success_url', `${env.SITE_URL}/posted?success=1&subscribed=1`);
+        params.append('cancel_url', `${env.SITE_URL}/posted?cancelled=1`);
+
+        const res = await fetch('https://api.stripe.com/v1/checkout/sessions', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${env.STRIPE_SECRET_KEY}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: params.toString(),
+        });
+        if (!res.ok) return jsonResponse({ error: 'Could not start checkout' }, 500, ALLOWED_ORIGIN);
+        const session = await res.json();
         return jsonResponse({ checkoutUrl: session.url }, 200, ALLOWED_ORIGIN);
       }
 
@@ -149,6 +191,7 @@ Brew method: ${method}. Problem: ${issue}`;
               record.paidAt = Date.now();
               const days = LISTING_DAYS[record.kind === 'job' ? `job_${record.tier}` : `shift_${record.tier}`] || 14;
               const ttl = days * 24 * 60 * 60;
+              record.expiresAt = Date.now() + ttl * 1000;
               await env.FDC_STORE.put(`listing:${listingId}`, JSON.stringify(record), { expirationTtl: ttl });
               await env.FDC_STORE.delete(`pending:${listingId}`);
               // Optional: fire your existing Zapier webhook here to crosspost to Facebook
@@ -170,10 +213,32 @@ Brew method: ${method}. Problem: ${issue}`;
           const record = JSON.parse(raw);
           if (record.flagged) continue; // hidden pending your review
           if (kind && record.kind !== kind) continue;
+          const viewsRaw = await env.FDC_STORE.get(`views:${record.id}`);
+          record.views = viewsRaw ? parseInt(viewsRaw, 10) : 0;
           items.push(record);
         }
         items.sort((a, b) => b.createdAt - a.createdAt);
         return jsonResponse({ items }, 200, ALLOWED_ORIGIN);
+      }
+
+      // ── NEW: VIEW COUNTER — one increment per card render ────
+      if (path === '/listings/view' && request.method === 'POST') {
+        const { id } = await request.json();
+        if (!id) return jsonResponse({ error: 'Missing id' }, 400, ALLOWED_ORIGIN);
+        const current = await env.FDC_STORE.get(`views:${id}`);
+        const next = (current ? parseInt(current, 10) : 0) + 1;
+        await env.FDC_STORE.put(`views:${id}`, String(next), { expirationTtl: 60 * 60 * 24 * 45 });
+        return jsonResponse({ views: next }, 200, ALLOWED_ORIGIN);
+      }
+
+      // ── NEW: SAVED-SEARCH ALERTS — email when a matching listing appears ──
+      if (path === '/alerts/create' && request.method === 'POST') {
+        const { email, kind, role, area, minRate } = await request.json();
+        if (!email || !kind) return jsonResponse({ error: 'Email and kind are required' }, 400, ALLOWED_ORIGIN);
+        const id = crypto.randomUUID();
+        const alert = { id, email, kind, role: role || '', area: area || '', minRate: minRate || 0, createdAt: Date.now(), lastChecked: Date.now() };
+        await env.FDC_STORE.put(`alert:${id}`, JSON.stringify(alert), { expirationTtl: 60 * 60 * 24 * 90 });
+        return jsonResponse({ created: true }, 200, ALLOWED_ORIGIN);
       }
 
       // ── NEW: FLAG / REPORT A LISTING — alerts you by email ───
@@ -221,10 +286,57 @@ Brew method: ${method}. Problem: ${issue}`;
         return new Response('Listing restored to the board. You can close this tab.', { status: 200 });
       }
 
+      // ── NEW: APPLY — sends the application by email server-side, so a
+      // candidate's CV (pasted once, remembered in their browser) doesn't
+      // need re-attaching for every job ──
+      if (path === '/apply' && request.method === 'POST') {
+        const { employerEmail, name, candidateEmail, role, about, cv, jobTitle } = await request.json();
+        if (!employerEmail || !name || !candidateEmail) {
+          return jsonResponse({ error: 'Missing required fields' }, 400, ALLOWED_ORIGIN);
+        }
+        const subject = `Application: ${jobTitle || 'Role'} — ${name}`;
+        const text = `New application via Dublin Coffee Jobs\n\nRole: ${jobTitle || ''}\nName: ${name}\nEmail: ${candidateEmail}\nRole/experience: ${role || ''}\n${about ? '\nNote: ' + about + '\n' : ''}\n${cv ? '\n--- CV ---\n' + cv + '\n' : '\n(No CV text provided)\n'}`;
+        await sendEmailTo(env, employerEmail, subject, text, candidateEmail);
+        return jsonResponse({ sent: true }, 200, ALLOWED_ORIGIN);
+      }
+
       return jsonResponse({ error: 'Unknown endpoint' }, 404, ALLOWED_ORIGIN);
 
     } catch (err) {
       return jsonResponse({ error: 'Something went wrong', detail: String(err) }, 500, ALLOWED_ORIGIN);
+    }
+  },
+
+  // Runs on the cron schedule set in wrangler.toml (hourly). Checks every
+  // saved alert against listings created since it last ran, and emails a
+  // digest of matches. Updates lastChecked so nothing gets emailed twice.
+  async scheduled(event, env, ctx) {
+    const alertList = await env.FDC_STORE.list({ prefix: 'alert:' });
+    const listingList = await env.FDC_STORE.list({ prefix: 'listing:' });
+    const listings = [];
+    for (const key of listingList.keys) {
+      const raw = await env.FDC_STORE.get(key.name);
+      if (raw) listings.push(JSON.parse(raw));
+    }
+
+    for (const key of alertList.keys) {
+      const raw = await env.FDC_STORE.get(key.name);
+      if (!raw) continue;
+      const alert = JSON.parse(raw);
+      const matches = listings.filter(l =>
+        !l.flagged &&
+        l.kind === alert.kind &&
+        l.createdAt > alert.lastChecked &&
+        (!alert.role || (l.data.role || l.data.title || '').toLowerCase().includes(alert.role.toLowerCase())) &&
+        (!alert.area || (l.data.location || l.data.area || '').toLowerCase().includes(alert.area.toLowerCase()))
+      );
+
+      if (matches.length > 0) {
+        const lines = matches.map(m => `- ${m.data.title || m.data.role || 'Listing'} — ${m.data.venue || ''} ${m.data.location || m.data.area || ''}`).join('\n');
+        await sendEmailTo(env, alert.email, `New matches on Dublin Coffee Jobs`, `New listings matching your saved search:\n\n${lines}\n\nView them at ${env.SITE_URL}`);
+      }
+      alert.lastChecked = Date.now();
+      await env.FDC_STORE.put(key.name, JSON.stringify(alert), { expirationTtl: 60 * 60 * 24 * 90 });
     }
   }
 };
@@ -253,6 +365,27 @@ function jsonResponse(data, status, origin) {
     status,
     headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': origin }
   });
+}
+
+// Checks Stripe for a customer with this email who has an active subscription
+// to the job_retainer price. Used to let subscribers post free.
+async function hasActiveSubscription(email, env) {
+  try {
+    const custRes = await fetch(`https://api.stripe.com/v1/customers?email=${encodeURIComponent(email)}&limit=3`, {
+      headers: { 'Authorization': `Bearer ${env.STRIPE_SECRET_KEY}` },
+    });
+    if (!custRes.ok) return false;
+    const custData = await custRes.json();
+    for (const customer of (custData.data || [])) {
+      const subRes = await fetch(`https://api.stripe.com/v1/subscriptions?customer=${customer.id}&status=active&limit=5`, {
+        headers: { 'Authorization': `Bearer ${env.STRIPE_SECRET_KEY}` },
+      });
+      if (!subRes.ok) continue;
+      const subData = await subRes.json();
+      if ((subData.data || []).some(s => s.items.data.some(i => i.price.id === PRICE_IDS.job_retainer))) return true;
+    }
+    return false;
+  } catch (e) { return false; }
 }
 
 // Creates a Stripe Checkout Session via plain REST call (no SDK needed in Workers)
@@ -295,6 +428,24 @@ async function verifyStripeSignature(rawBody, sigHeader, secret) {
   return expected === signature;
 }
 
+// Sends an email to any address — used for saved-search alert digests and
+// job applications. Pass replyTo so the recipient can reply straight to
+// the candidate rather than to the noreply alerts address.
+async function sendEmailTo(env, to, subject, text, replyTo) {
+  const payload = {
+    personalizations: [{ to: [{ email: to }] }],
+    from: { email: 'alerts@firstdraftcoffee.net', name: 'Dublin Coffee Jobs' },
+    subject,
+    content: [{ type: 'text/plain', value: text }],
+  };
+  if (replyTo) payload.reply_to = { email: replyTo };
+  await fetch('https://api.mailchannels.net/tx/v1/send', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+
 // Sends an alert email via MailChannels — free on Cloudflare Workers,
 // requires SPF/DKIM records on firstdraftcoffee.net (one-time DNS setup,
 // see README-setup.md). No API key needed.
@@ -310,4 +461,3 @@ async function sendAlertEmail(env, { subject, text }) {
     }),
   });
 }
-
