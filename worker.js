@@ -183,6 +183,7 @@ Brew method: ${method}. Problem: ${issue}`;
             record.expiresAt = Date.now() + ttl * 1000;
             await env.FDC_STORE.put(`listing:${id}`, JSON.stringify(record), { expirationTtl: ttl });
             ctx.waitUntil(postToSocial(record, env));
+            ctx.waitUntil(notifyGroupPost(record, env));
             return jsonResponse({ published: true, id }, 200, ALLOWED_ORIGIN);
           }
         }
@@ -256,6 +257,7 @@ Brew method: ${method}. Problem: ${issue}`;
               await env.FDC_STORE.delete(`pending:${listingId}`);
               if (record.kind === 'job' || record.kind === 'shift_need') {
                 ctx.waitUntil(postToSocial(record, env));
+                ctx.waitUntil(notifyGroupPost(record, env));
               }
               // Optional: fire your existing Zapier webhook here to crosspost to Facebook
               // await fetch(env.ZAPIER_WEBHOOK_URL, { method: 'POST', body: JSON.stringify(record) });
@@ -497,6 +499,21 @@ async function verifyStripeSignature(rawBody, sigHeader, secret) {
   const sigBuffer = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(signedPayload));
   const expected = [...new Uint8Array(sigBuffer)].map(b => b.toString(16).padStart(2, '0')).join('');
   return expected === signature;
+}
+
+// Emails you the ready-to-paste post text for the Dublin Coffee Jobs
+// Facebook Group, since Meta removed the ability for any app to post into
+// Groups automatically in 2024. Same caption as the auto-posted Instagram/
+// Facebook Page post — just copy, paste into the Group, done.
+async function notifyGroupPost(record, env) {
+  if (!env.ALERT_EMAIL_TO) return;
+  const d = record.data;
+  const isJob = record.kind === 'job';
+  const url = isJob ? `${env.SITE_URL}/job-board.html?id=${record.id}` : `${env.SITE_URL}/shift-cover.html?id=${record.id}`;
+  const caption = isJob
+    ? `New job: ${d.title} at ${d.venue}\n${d.location} · ${d.salary} · ${d.type}\n\nApply: ${url}`
+    : `Shift cover needed: ${d.role} at ${d.venue}\n${d.location} · ${d.date} ${d.hours} · ${d.rate}\n\nDetails: ${url}`;
+  await sendEmailTo(env, env.ALERT_EMAIL_TO, `Paste into the DCJ Group: ${d.title || d.role}`, `A new listing just went live and posted to Instagram + the Facebook Page automatically.\n\nThe Facebook Group still needs a manual paste (Meta doesn't allow apps to auto-post into Groups) — here's the text, ready to copy:\n\n---\n${caption}\n---`);
 }
 
 // Cross-posts a newly published job or shift-need listing to the Facebook
