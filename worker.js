@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════
-
+// First Draft Coffee — Unified Cloudflare Worker (v2)
 // Handles: CV Review, Brew Compass, Job Listings, Shift Cover,
 //          Stripe Checkout + Webhook, Flag/Report alerts
 //
