@@ -39,6 +39,56 @@ const PRICE_IDS = {
 
 const LISTING_DAYS = { job_standard: 14, job_featured: 30, shift_need: 7, shift_need_urgent: 7 };
 
+// Real, current Irish hospitality/coffee hiring knowledge — supplied by Ger,
+// grounds the CV reviewer in actual market reality instead of generic advice.
+// Update this whenever the market shifts; it's used by both the free and
+// paid CV review prompts below.
+const IRISH_HOSPITALITY_KNOWLEDGE = `
+IRISH HOSPITALITY & COFFEE JOB MARKET KNOWLEDGE (2026) — ground your review in this, not generic advice:
+
+PAY BANDS 2026 (entry / experienced / senior):
+- Barista: €14.50-15.50 / €15.50-17 / €17-19 per hr
+- Head Barista: — / €17-19 / €19-22 per hr
+- Waiter/Server: €14.50-15.50 / €15.50-18 / €18-20 per hr
+- Bartender: €14.50-16 / €16-18 / €18-20 per hr
+- Kitchen Porter: €14.50-15.50 / €15.50-17 / €17+ per hr
+- Hotel Receptionist: €15-16 / €16-18 / €18-20 per hr
+- Café Manager: €38-45k / €45-55k / €55-65k+
+- Head Chef: €45-55k / €55-70k / €70-90k+
+Dublin typically adds €1-2/hr for hourly staff and €5-10k/yr for managers on top of the above. Galway and Cork are closing the gap with Dublin; smaller towns run below these figures. National minimum wage is €14.50/hr (from 1 Jan 2026).
+
+CERTIFICATIONS — what actually matters to employers, don't overweight the rest:
+- HACCP: essential, especially for chefs, kitchen staff, café managers, supervisors. Worth flagging if missing.
+- RSA (Responsible Service of Alcohol): essential wherever alcohol is served — hotels, restaurants, bars, wine cafés.
+- Manual Handling: expected, not impressive, but absence can delay onboarding.
+- First Aid: a genuine plus for supervisors/managers.
+- SCA Barista Skills: Foundation is good, Intermediate is valuable, Professional shows real commitment.
+- Sensory/cupping certs: valuable for specialty coffee roles, especially QC/roasting.
+- Green coffee certs: mostly relevant only to roasteries. Roasting certs: a big plus but niche.
+- Latte art certificates, generic "coffee school" attendance, or unrecognised online certs rarely move the needle.
+
+WHAT MAKES A HOSPITALITY/COFFEE CV ACTUALLY STAND OUT:
+- Named equipment/machine experience (e.g. La Marzocco Linea PB/KB90, Victoria Arduino Black Eagle, Mythos, Mahlkönig EK43/E65S, Mazzer Robur, PuqPress) signals real skill level.
+- Recognisable, respected venues (established specialty cafés, well-regarded hotels, Michelin restaurants) add credibility — a year somewhere excellent often outweighs three years somewhere unknown.
+- Multi-site experience (area manager, operations, training, regional) signals systems thinking — a big plus for senior roles.
+- Quantified achievements ("managed 12 staff," "€25k weekly sales," "reduced waste by 15%," "opened 3 new cafés") beat duty lists every time.
+- Clear promotion history (Barista → Senior Barista → Head Barista → Manager) shows people trusted them.
+
+COMMON CV MISTAKES WORTH FLAGGING:
+- "Passionate about coffee/hospitality" — meaningless filler on almost every CV, should be cut.
+- Missing employment dates — an immediate red flag to employers.
+- Large unexplained employment gaps — not necessarily bad, but should be briefly addressed.
+- CVs over 2 pages (3 max for senior management) — too long.
+- Walls of text instead of bullet points — hard to skim.
+- Listing duties ("made coffee, served customers, cleaned café") instead of impact/achievements — the single biggest weakness to flag.
+- Misspelled venue names (getting well-known places or chains wrong) — very noticeable, a real credibility hit.
+- Generic objective statements ("seeking a challenging position...") — should be cut entirely.
+- Missing contact details — more common than you'd think, always worth checking.
+
+HIRING SEASONALITY (useful for advice on timing an application):
+Jan-Feb quiet (post-Christmas, replacing staff only). March hiring begins, April-May busy. June-August peak (tourism, events, students). September another spike as students leave and businesses stabilise. October steady. November is Christmas recruitment season. December is almost entirely emergency cover, very little permanent hiring. Coffee-specific hiring often follows café openings, new wholesale contracts, roasting expansion, and summer tourism.
+`;
+
 export default {
   async fetch(request, env, ctx) {
     const ALLOWED_ORIGIN = '*';
@@ -62,15 +112,34 @@ export default {
         if (!cv || cv.length < 100) return jsonResponse({ error: 'CV too short' }, 400, ALLOWED_ORIGIN);
         if (cv.length > 8000) return jsonResponse({ error: 'CV too long' }, 400, ALLOWED_ORIGIN);
 
-        const prompt = `You are an expert recruiter specialising in the Dublin coffee and hospitality industry.
-Review this CV for someone applying for a ${role || 'barista'} role in Dublin. Be specific, practical, and direct.
+        const prompt = `You are an expert recruiter specialising in the Irish coffee and hospitality industry, working nationwide (not just Dublin).
+${IRISH_HOSPITALITY_KNOWLEDGE}
+Review this CV for someone applying for a ${role || 'barista'} role. Score it against this exact 100-point matrix — use the full range within each category, don't default to the middle:
+- experience (0-20): relevance and quality of roles/venues to the target role
+- progression (0-15): promotions, increasing responsibility over time
+- longevity (0-15): tenure length per role, gaps explained or not
+- certifications (0-15): HACCP, RSA, SCA levels, First Aid etc. — per the guidance above on what actually matters
+- technicalSkills (0-15): named equipment/machines, POS/booking systems, multi-site systems experience
+- presentation (0-10): length, structure, clarity, spelling (especially venue names), no generic filler like "passionate"
+- culturalFit (0-10): tone and evidence of customer service / teamwork disposition in how they write about themselves
+Be specific, practical, and direct — ground feedback in the real pay bands, certifications, and standout factors above rather than generic advice.
 CV: ${cv}
-Respond ONLY with a JSON object (no markdown, no backticks):
-{"score":<1-100>,"scoreLabel":"<short phrase>","strengths":["...","...","..."],"improvements":["...","...","..."],"missingElements":["...","..."],"verdict":"<2-3 sentences>"}`;
+Respond ONLY with a JSON object (no markdown, no backticks, no overall score — that's calculated separately):
+{"scoreBreakdown":{"experience":<0-20>,"progression":<0-15>,"longevity":<0-15>,"certifications":<0-15>,"technicalSkills":<0-15>,"presentation":<0-10>,"culturalFit":<0-10>},"strengths":["...","...","..."],"improvements":["...","...","..."],"missingElements":["...","..."],"verdict":"<2-3 sentences>"}`;
 
         const data = await callClaude(prompt, env);
         const text = data.content.map(i => i.text || '').join('');
         const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
+
+        // Compute the overall score ourselves from the breakdown, rather than
+        // trusting the model's arithmetic — keeps scoring genuinely consistent
+        // candidate to candidate.
+        const b = parsed.scoreBreakdown || {};
+        const score = Math.round((b.experience||0) + (b.progression||0) + (b.longevity||0) + (b.certifications||0) + (b.technicalSkills||0) + (b.presentation||0) + (b.culturalFit||0));
+        const scoreLabel = score >= 85 ? 'Outstanding candidate' : score >= 70 ? 'Strong candidate' : score >= 50 ? 'Solid, needs work' : 'Needs significant work';
+        parsed.score = score;
+        parsed.scoreLabel = scoreLabel;
+
         return jsonResponse(parsed, 200, ALLOWED_ORIGIN);
       }
 
@@ -116,8 +185,9 @@ Respond ONLY with a JSON object (no markdown, no backticks):
         if (record.status === 'pending') return jsonResponse({ status: 'pending' }, 200, ALLOWED_ORIGIN);
 
         if (record.status === 'paid') {
-          const prompt = `You are an expert recruiter specialising in the Dublin coffee and hospitality industry.
-Give a detailed, line-by-line review of this CV for someone applying for a ${record.role || 'barista'} role. Be specific and practical.
+          const prompt = `You are an expert recruiter specialising in the Irish coffee and hospitality industry, working nationwide (not just Dublin).
+${IRISH_HOSPITALITY_KNOWLEDGE}
+Give a detailed, line-by-line review of this CV for someone applying for a ${record.role || 'barista'} role. Be specific and practical — ground your feedback in the real pay bands, certifications, and standout factors above rather than generic advice.
 CV: ${record.cv}
 Respond ONLY with a JSON object (no markdown, no backticks):
 {"lineNotes":["specific note on one part of the CV","...","..."],"rewrittenSummary":"<a rewritten 2-4 sentence professional summary/personal statement for this candidate, ready to paste at the top of their CV>"}`;
@@ -270,6 +340,12 @@ Brew method: ${method}. Problem: ${issue}`;
               const record = JSON.parse(raw);
               record.status = 'paid';
               await env.FDC_STORE.put(`cvreview:${reviewId}`, JSON.stringify(record), { expirationTtl: 60 * 60 * 24 });
+            }
+          } else if (session.mode === 'subscription') {
+            const subscriberEmail = session.customer_email || session.customer_details?.email;
+            if (subscriberEmail) {
+              ctx.waitUntil(sendEmailTo(env, subscriberEmail, 'Your Dublin Coffee Jobs subscription is active',
+                `Thanks for subscribing to unlimited job posts on Dublin Coffee Jobs.\n\nYour subscription is now active. From here:\n\n- Post as many jobs as you like at ${env.SITE_URL}/job-board.html — use this same email address (${subscriberEmail}) each time and it'll publish free automatically, no checkout needed.\n- Add a logo URL when posting and it'll show on your listings.\n- Manage or cancel any time from the receipt/invoice email Stripe sends separately, or by contacting us directly.\n\nQuestions — just reply to this email.`));
             }
           }
         }
