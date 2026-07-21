@@ -76,7 +76,7 @@ Respond ONLY with a JSON object (no markdown, no backticks):
 
       // ── NEW: CV FULL REVIEW — paid, starts Stripe Checkout ───
       if (path === '/cv/full/start' && request.method === 'POST') {
-        const { cv, role } = await request.json();
+        const { cv, role, email } = await request.json();
         if (!cv || cv.length < 100) return jsonResponse({ error: 'CV too short' }, 400, ALLOWED_ORIGIN);
         if (cv.length > 8000) return jsonResponse({ error: 'CV too long' }, 400, ALLOWED_ORIGIN);
         const priceId = PRICE_IDS.cv_full;
@@ -93,6 +93,7 @@ Respond ONLY with a JSON object (no markdown, no backticks):
         params.append('success_url', `${env.SITE_URL}/cv-review.html?reviewId=${id}&success=1`);
         params.append('cancel_url', `${env.SITE_URL}/cv-review.html?cancelled=1`);
         params.append('metadata[reviewId]', id);
+        if (email) params.append('customer_email', email);
 
         const res = await fetch('https://api.stripe.com/v1/checkout/sessions', {
           method: 'POST',
@@ -199,6 +200,7 @@ Brew method: ${method}. Problem: ${issue}`;
         const session = await createStripeCheckoutSession({
           priceId,
           listingId: id,
+          email: data.email,
           successUrl: `${env.SITE_URL}/posted?success=1&id=${id}`,
           cancelUrl: `${env.SITE_URL}/posted?cancelled=1`,
         }, env);
@@ -461,7 +463,7 @@ async function hasActiveSubscription(email, env) {
 }
 
 // Creates a Stripe Checkout Session via plain REST call (no SDK needed in Workers)
-async function createStripeCheckoutSession({ priceId, listingId, successUrl, cancelUrl }, env) {
+async function createStripeCheckoutSession({ priceId, listingId, email, successUrl, cancelUrl }, env) {
   const params = new URLSearchParams();
   params.append('mode', 'payment');
   params.append('allow_promotion_codes', 'true');
@@ -470,6 +472,7 @@ async function createStripeCheckoutSession({ priceId, listingId, successUrl, can
   params.append('success_url', successUrl);
   params.append('cancel_url', cancelUrl);
   params.append('metadata[listingId]', listingId);
+  if (email) params.append('customer_email', email);
 
   const res = await fetch('https://api.stripe.com/v1/checkout/sessions', {
     method: 'POST',
