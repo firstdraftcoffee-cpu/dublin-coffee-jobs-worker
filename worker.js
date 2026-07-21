@@ -29,11 +29,12 @@
 // ═══════════════════════════════════════════════════════════════
 
 const PRICE_IDS = {
-  job_standard:       'price_1TusgiJExrSWtqFLz37CJZd2', // Standard Job Listing — €50 / 14 days
-  job_featured:       'price_1Tush8JExrSWtqFLF1xMwK7J', // Featured Job Listing — €75 / 30 days
-  job_retainer:       'price_XXXXXXXXXXXXXX',           // Monthly unlimited-posts subscription — create as a RECURRING price in Stripe and paste the ID here
-  shift_need:         'price_1TusfEJExrSWtqFLReq0x3ff', // Standard Listing — €10 venue shift post / 7 days
-  shift_need_urgent:  'price_1Tusg8JExrSWtqFLBMrLWFbD', // Urgent Staff Listing — €25 featured/urgent shift post
+  job_standard:       'price_1TusgiJExrSWtqFLz37CJZd2', // Standard Job Listing — €35 / 14 days
+  job_featured:       'price_1Tush8JExrSWtqFLF1xMwK7J', // Featured Job Listing — €50 / 30 days
+  job_retainer:       'price_1TvNkVJExrSWtqFL22x9WWtN', // Monthly unlimited-posts subscription — €200/mo
+  shift_need:         'price_1TvbIvJExrSWtqFLmhrDFPKU', // Standard Listing — €35 venue shift post / 7 days
+  shift_need_urgent:  'price_1Tusg8JExrSWtqFLBMrLWFbD', // Urgent Staff Listing — €50 featured/urgent shift post
+  cv_full:            'price_1TvbGRJExrSWtqFLSdBRAtZI', // CV Review — Full Review with rewritten summary — €10
 };
 
 const LISTING_DAYS = { job_standard: 14, job_featured: 30, shift_need: 7, shift_need_urgent: 7 };
@@ -73,7 +74,63 @@ Respond ONLY with a JSON object (no markdown, no backticks):
         return jsonResponse(parsed, 200, ALLOWED_ORIGIN);
       }
 
-      // ── EXISTING: BREW COMPASS ───────────────────────────────
+      // ── NEW: CV FULL REVIEW — paid, starts Stripe Checkout ───
+      if (path === '/cv/full/start' && request.method === 'POST') {
+        const { cv, role } = await request.json();
+        if (!cv || cv.length < 100) return jsonResponse({ error: 'CV too short' }, 400, ALLOWED_ORIGIN);
+        if (cv.length > 8000) return jsonResponse({ error: 'CV too long' }, 400, ALLOWED_ORIGIN);
+        const priceId = PRICE_IDS.cv_full;
+        if (!priceId) return jsonResponse({ error: 'Full review not configured yet' }, 400, ALLOWED_ORIGIN);
+
+        const id = crypto.randomUUID();
+        await env.FDC_STORE.put(`cvreview:${id}`, JSON.stringify({ cv, role, status: 'pending', createdAt: Date.now() }), { expirationTtl: 60 * 60 * 2 });
+
+        const params = new URLSearchParams();
+        params.append('mode', 'payment');
+        params.append('allow_promotion_codes', 'true');
+        params.append('line_items[0][price]', priceId);
+        params.append('line_items[0][quantity]', '1');
+        params.append('success_url', `${env.SITE_URL}/cv-review.html?reviewId=${id}&success=1`);
+        params.append('cancel_url', `${env.SITE_URL}/cv-review.html?cancelled=1`);
+        params.append('metadata[reviewId]', id);
+
+        const res = await fetch('https://api.stripe.com/v1/checkout/sessions', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${env.STRIPE_SECRET_KEY}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: params.toString(),
+        });
+        if (!res.ok) { const errText = await res.text(); return jsonResponse({ error: 'Stripe: ' + errText.slice(0,200) }, 500, ALLOWED_ORIGIN); }
+        const session = await res.json();
+        return jsonResponse({ checkoutUrl: session.url }, 200, ALLOWED_ORIGIN);
+      }
+
+      // ── NEW: CV FULL REVIEW — fetch result once paid ─────────
+      if (path === '/cv/full/result' && request.method === 'GET') {
+        const id = url.searchParams.get('id');
+        if (!id) return jsonResponse({ error: 'Missing id' }, 400, ALLOWED_ORIGIN);
+        const raw = await env.FDC_STORE.get(`cvreview:${id}`);
+        if (!raw) return jsonResponse({ error: 'Not found or expired' }, 404, ALLOWED_ORIGIN);
+        const record = JSON.parse(raw);
+
+        if (record.status === 'pending') return jsonResponse({ status: 'pending' }, 200, ALLOWED_ORIGIN);
+
+        if (record.status === 'paid') {
+          const prompt = `You are an expert recruiter specialising in the Dublin coffee and hospitality industry.
+Give a detailed, line-by-line review of this CV for someone applying for a ${record.role || 'barista'} role. Be specific and practical.
+CV: ${record.cv}
+Respond ONLY with a JSON object (no markdown, no backticks):
+{"lineNotes":["specific note on one part of the CV","...","..."],"rewrittenSummary":"<a rewritten 2-4 sentence professional summary/personal statement for this candidate, ready to paste at the top of their CV>"}`;
+          const data = await callClaude(prompt, env);
+          const text = data.content.map(i => i.text || '').join('');
+          const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
+          record.status = 'done';
+          record.result = parsed;
+          await env.FDC_STORE.put(`cvreview:${id}`, JSON.stringify(record), { expirationTtl: 60 * 60 * 24 });
+          return jsonResponse({ status: 'done', result: parsed }, 200, ALLOWED_ORIGIN);
+        }
+
+        return jsonResponse({ status: 'done', result: record.result }, 200, ALLOWED_ORIGIN);
+      }
       if (path === '/brew' && request.method === 'POST') {
         const { method, issue } = await request.json();
         if (!issue || issue.trim().length < 10) return jsonResponse({ error: 'Please describe the issue' }, 400, ALLOWED_ORIGIN);
@@ -125,6 +182,7 @@ Brew method: ${method}. Problem: ${issue}`;
             const ttl = 30 * 24 * 60 * 60; // 30 days, repost any time while subscribed
             record.expiresAt = Date.now() + ttl * 1000;
             await env.FDC_STORE.put(`listing:${id}`, JSON.stringify(record), { expirationTtl: ttl });
+            ctx.waitUntil(postToSocial(record, env));
             return jsonResponse({ published: true, id }, 200, ALLOWED_ORIGIN);
           }
         }
@@ -156,6 +214,7 @@ Brew method: ${method}. Problem: ${issue}`;
 
         const params = new URLSearchParams();
         params.append('mode', 'subscription');
+        params.append('allow_promotion_codes', 'true');
         params.append('customer_email', email);
         params.append('line_items[0][price]', priceId);
         params.append('line_items[0][quantity]', '1');
@@ -167,7 +226,7 @@ Brew method: ${method}. Problem: ${issue}`;
           headers: { 'Authorization': `Bearer ${env.STRIPE_SECRET_KEY}`, 'Content-Type': 'application/x-www-form-urlencoded' },
           body: params.toString(),
         });
-        if (!res.ok) return jsonResponse({ error: 'Could not start checkout' }, 500, ALLOWED_ORIGIN);
+        if (!res.ok) { const errText = await res.text(); return jsonResponse({ error: 'Stripe: ' + errText.slice(0,200) }, 500, ALLOWED_ORIGIN); }
         const session = await res.json();
         return jsonResponse({ checkoutUrl: session.url }, 200, ALLOWED_ORIGIN);
       }
@@ -183,6 +242,7 @@ Brew method: ${method}. Problem: ${issue}`;
         if (event.type === 'checkout.session.completed') {
           const session = event.data.object;
           const listingId = session.metadata?.listingId;
+          const reviewId = session.metadata?.reviewId;
           if (listingId) {
             const pendingRaw = await env.FDC_STORE.get(`pending:${listingId}`);
             if (pendingRaw) {
@@ -194,8 +254,18 @@ Brew method: ${method}. Problem: ${issue}`;
               record.expiresAt = Date.now() + ttl * 1000;
               await env.FDC_STORE.put(`listing:${listingId}`, JSON.stringify(record), { expirationTtl: ttl });
               await env.FDC_STORE.delete(`pending:${listingId}`);
+              if (record.kind === 'job' || record.kind === 'shift_need') {
+                ctx.waitUntil(postToSocial(record, env));
+              }
               // Optional: fire your existing Zapier webhook here to crosspost to Facebook
               // await fetch(env.ZAPIER_WEBHOOK_URL, { method: 'POST', body: JSON.stringify(record) });
+            }
+          } else if (reviewId) {
+            const raw = await env.FDC_STORE.get(`cvreview:${reviewId}`);
+            if (raw) {
+              const record = JSON.parse(raw);
+              record.status = 'paid';
+              await env.FDC_STORE.put(`cvreview:${reviewId}`, JSON.stringify(record), { expirationTtl: 60 * 60 * 24 });
             }
           }
         }
@@ -392,6 +462,7 @@ async function hasActiveSubscription(email, env) {
 async function createStripeCheckoutSession({ priceId, listingId, successUrl, cancelUrl }, env) {
   const params = new URLSearchParams();
   params.append('mode', 'payment');
+  params.append('allow_promotion_codes', 'true');
   params.append('line_items[0][price]', priceId);
   params.append('line_items[0][quantity]', '1');
   params.append('success_url', successUrl);
@@ -426,6 +497,49 @@ async function verifyStripeSignature(rawBody, sigHeader, secret) {
   const sigBuffer = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(signedPayload));
   const expected = [...new Uint8Array(sigBuffer)].map(b => b.toString(16).padStart(2, '0')).join('');
   return expected === signature;
+}
+
+// Cross-posts a newly published job or shift-need listing to the Facebook
+// Page and Instagram Business account. Fire-and-forget — failures here
+// never block the listing itself from going live. Needs three secrets set
+// in Cloudflare: FB_PAGE_ID, FB_PAGE_ACCESS_TOKEN, IG_USER_ID.
+async function postToSocial(record, env) {
+  if (!env.FB_PAGE_ACCESS_TOKEN || !env.FB_PAGE_ID) return; // not configured yet
+  const d = record.data;
+  const isJob = record.kind === 'job';
+  const url = isJob ? `${env.SITE_URL}/job-board.html?id=${record.id}` : `${env.SITE_URL}/shift-cover.html?id=${record.id}`;
+  const caption = isJob
+    ? `New job: ${d.title} at ${d.venue}\n${d.location} · ${d.salary} · ${d.type}\n\nApply: ${url}\n\n#DublinJobs #HospitalityJobs #DublinCoffeeJobs`
+    : `Shift cover needed: ${d.role} at ${d.venue}\n${d.location} · ${d.date} ${d.hours} · ${d.rate}\n\nDetails: ${url}\n\n#DublinJobs #HospitalityJobs #DublinCoffeeJobs`;
+
+  try {
+    // Facebook Page post (text + link, no image required)
+    await fetch(`https://graph.facebook.com/v19.0/${env.FB_PAGE_ID}/feed`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ message: caption, link: url, access_token: env.FB_PAGE_ACCESS_TOKEN }).toString(),
+    });
+  } catch (e) { /* fail quietly, listing already live regardless */ }
+
+  try {
+    // Instagram requires an image — reuse a fixed branded photo for now
+    if (env.IG_USER_ID) {
+      const imageUrl = `${env.SITE_URL}/${isJob ? 'job-board-hero.jpg' : 'shift-cover-hero.jpg'}`;
+      const createRes = await fetch(`https://graph.facebook.com/v19.0/${env.IG_USER_ID}/media`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ image_url: imageUrl, caption, access_token: env.FB_PAGE_ACCESS_TOKEN }).toString(),
+      });
+      const created = await createRes.json();
+      if (created.id) {
+        await fetch(`https://graph.facebook.com/v19.0/${env.IG_USER_ID}/media_publish`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ creation_id: created.id, access_token: env.FB_PAGE_ACCESS_TOKEN }).toString(),
+        });
+      }
+    }
+  } catch (e) { /* fail quietly, listing already live regardless */ }
 }
 
 // Sends an email to any address — used for saved-search alert digests and
