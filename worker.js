@@ -114,18 +114,19 @@ export default {
 
         const prompt = `You are an expert recruiter specialising in the Irish coffee and hospitality industry, working nationwide (not just Dublin).
 ${IRISH_HOSPITALITY_KNOWLEDGE}
-Review this CV for someone applying for a ${role || 'barista'} role. Score it against this exact 100-point matrix — use the full range within each category, don't default to the middle:
+Review this CV for someone applying for a ${role || 'barista'} role. Score it against this exact 100-point matrix — use the full range within each category, don't default to the middle. Never let the cause of a gap, non-native English phrasing, age, gender, disability, or immigration status affect any score:
+- reliability (0-25): tenure length per role and job-hopping pattern — this is the single biggest factor; score strictly on frequency/length of stints, never on any assumed cause of a gap or a short stint
 - experience (0-20): relevance and quality of roles/venues to the target role
-- progression (0-15): promotions, increasing responsibility over time
-- longevity (0-15): tenure length per role, gaps explained or not
-- certifications (0-15): HACCP, RSA, SCA levels, First Aid etc. — per the guidance above on what actually matters
-- technicalSkills (0-15): named equipment/machines, POS/booking systems, multi-site systems experience
-- presentation (0-10): length, structure, clarity, spelling (especially venue names), no generic filler like "passionate"
-- culturalFit (0-10): tone and evidence of customer service / teamwork disposition in how they write about themselves
-Be specific, practical, and direct — ground feedback in the real pay bands, certifications, and standout factors above rather than generic advice.
+- achievements (0-20): quantified impact, competitions, training others, promotions earned, measurable results — not just duties
+- progression (0-10): promotions, increasing responsibility over time
+- technicalSkills (0-10): named equipment/machines, POS/booking systems, multi-site systems experience
+- presentation (0-5): length, structure, clarity, spelling (especially venue names), no generic filler like "passionate" — never penalise non-native English phrasing here
+- certifications (0-5): HACCP, RSA, SCA levels, First Aid etc. — per the guidance above on what actually matters
+- roleFit (0-5): how well the CV's experience and stated goals fit the target role, including realistic fits for total beginners
+Be specific, practical, and direct — ground feedback in the real pay bands, certifications, and standout factors above rather than generic advice. Always stay encouraging in tone, even for a weak CV — focus on concrete next steps rather than just listing deficits.
 CV: ${cv}
 Respond ONLY with a JSON object (no markdown, no backticks, no overall score — that's calculated separately):
-{"scoreBreakdown":{"experience":<0-20>,"progression":<0-15>,"longevity":<0-15>,"certifications":<0-15>,"technicalSkills":<0-15>,"presentation":<0-10>,"culturalFit":<0-10>},"strengths":["...","...","..."],"improvements":["...","...","..."],"missingElements":["...","..."],"verdict":"<2-3 sentences>"}`;
+{"scoreBreakdown":{"reliability":<0-25>,"experience":<0-20>,"achievements":<0-20>,"progression":<0-10>,"technicalSkills":<0-10>,"presentation":<0-5>,"certifications":<0-5>,"roleFit":<0-5>},"bestFitRole":"<the specific role(s) this candidate is best suited for right now>","strengths":["...","...","..."],"improvements":["...","...","..."],"missingElements":["...","..."],"verdict":"<2-3 sentences>"}`;
 
         const data = await callClaude(prompt, env);
         const text = data.content.map(i => i.text || '').join('');
@@ -135,7 +136,7 @@ Respond ONLY with a JSON object (no markdown, no backticks, no overall score —
         // trusting the model's arithmetic — keeps scoring genuinely consistent
         // candidate to candidate.
         const b = parsed.scoreBreakdown || {};
-        const score = Math.round((b.experience||0) + (b.progression||0) + (b.longevity||0) + (b.certifications||0) + (b.technicalSkills||0) + (b.presentation||0) + (b.culturalFit||0));
+        const score = Math.round((b.reliability||0) + (b.experience||0) + (b.achievements||0) + (b.progression||0) + (b.technicalSkills||0) + (b.presentation||0) + (b.certifications||0) + (b.roleFit||0));
         const scoreLabel = score >= 85 ? 'Outstanding candidate' : score >= 70 ? 'Strong candidate' : score >= 50 ? 'Solid, needs work' : 'Needs significant work';
         parsed.score = score;
         parsed.scoreLabel = scoreLabel;
@@ -187,10 +188,10 @@ Respond ONLY with a JSON object (no markdown, no backticks, no overall score —
         if (record.status === 'paid') {
           const prompt = `You are an expert recruiter specialising in the Irish coffee and hospitality industry, working nationwide (not just Dublin).
 ${IRISH_HOSPITALITY_KNOWLEDGE}
-Give a detailed, line-by-line review of this CV for someone applying for a ${record.role || 'barista'} role. Be specific and practical — ground your feedback in the real pay bands, certifications, and standout factors above rather than generic advice.
+Give a detailed, line-by-line review of this CV for someone applying for a ${record.role || 'barista'} role. Be specific and practical — ground your feedback in the real pay bands, certifications, and standout factors above rather than generic advice. Never let the cause of a gap, non-native English phrasing, age, gender, disability, or immigration status affect any feedback, concern, or question. Stay encouraging in tone throughout.
 CV: ${record.cv}
 Respond ONLY with a JSON object (no markdown, no backticks):
-{"lineNotes":["specific note on one part of the CV","...","..."],"rewrittenSummary":"<a rewritten 2-4 sentence professional summary/personal statement for this candidate, ready to paste at the top of their CV>"}`;
+{"lineNotes":["specific note on one part of the CV","...","..."],"rewrittenSummary":"<a rewritten 2-4 sentence professional summary/personal statement for this candidate, ready to paste at the top of their CV>","potentialConcerns":["a genuine, fair concern an employer might raise, stated neutrally without speculating on cause","...","..."],"estimatedSalary":"<a realistic Irish pay range for this candidate right now, using the pay bands above>","interviewQuestions":["a targeted interview question this candidate should prepare for, based on their specific CV","...","...","...","..."]}`;
           const data = await callClaude(prompt, env);
           const text = data.content.map(i => i.text || '').join('');
           const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
