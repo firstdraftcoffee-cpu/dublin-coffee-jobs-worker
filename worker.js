@@ -502,12 +502,21 @@ async function callClaude(prompt, env) {
       'anthropic-version': '2023-06-01'
     },
     body: JSON.stringify({
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-sonnet-5',
       max_tokens: 1000,
       messages: [{ role: 'user', content: prompt }]
     })
   });
-  return res.json();
+  const data = await res.json();
+  // The Anthropic API returns an error object (no `content` field) on
+  // failures like a bad/retired model name, invalid key, or rate limits.
+  // Without this check, downstream code crashes on `data.content.map(...)`
+  // with a generic "Cannot read properties of undefined" — this makes the
+  // real reason show up in the Worker's error response instead.
+  if (!data.content) {
+    throw new Error('Claude API error: ' + JSON.stringify(data));
+  }
+  return data;
 }
 
 function jsonResponse(data, status, origin) {
