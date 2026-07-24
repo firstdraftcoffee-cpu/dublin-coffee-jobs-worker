@@ -605,6 +605,25 @@ async function notifyGroupPost(record, env) {
   await sendEmailTo(env, env.ALERT_EMAIL_TO, `Paste into the DCJ Group: ${d.title || d.role}`, `A new listing just went live and posted to Instagram + the Facebook Page automatically.\n\nThe Facebook Group still needs a manual paste (Meta doesn't allow apps to auto-post into Groups) — here's the text, ready to copy:\n\n---\n${caption}\n---`);
 }
 
+// Picks the image used for a social post. If the listing supplied its own
+// image (data.imageUrl, e.g. a photo the employer/venue uploaded), that's
+// used as-is. Otherwise this rotates through a fixed set of SOCIAL_IMAGE_COUNT
+// images stored at ${SITE_URL}/social/1.jpg ... /social/N.jpg, so posts don't
+// all look identical. The rotation position is kept in FDC_STORE so it
+// advances across requests/deployments rather than resetting each time.
+const SOCIAL_IMAGE_COUNT = 66;
+
+async function pickSocialImage(record, env) {
+  const custom = record.data && record.data.imageUrl && String(record.data.imageUrl).trim();
+  if (custom) return custom;
+
+  const raw = await env.FDC_STORE.get('social:image-counter');
+  const current = raw ? parseInt(raw, 10) : 0;
+  const index = (current % SOCIAL_IMAGE_COUNT) + 1; // 1-based filenames
+  await env.FDC_STORE.put('social:image-counter', String(current + 1));
+  return `${env.SITE_URL}/social/${index}.jpg`;
+}
+
 // Cross-posts a newly published job or shift-need listing to the Facebook
 // Page and Instagram Business account. Fire-and-forget — failures here
 // never block the listing itself from going live. Needs three secrets set
@@ -618,19 +637,31 @@ async function postToSocial(record, env) {
     ? `New job: ${d.title} at ${d.venue}\n${d.location} · ${d.salary} · ${d.type}\n\nApply: ${url}\n\n#DublinJobs #HospitalityJobs #DublinCoffeeJobs`
     : `Shift cover needed: ${d.role} at ${d.venue}\n${d.location} · ${d.date} ${d.hours} · ${d.rate}\n\nDetails: ${url}\n\n#DublinJobs #HospitalityJobs #DublinCoffeeJobs`;
 
-  try {
-    // Facebook Page post (text + link, no image required)
-    await fetch(`https://graph.facebook.com/v19.0/${env.FB_PAGE_ID}/feed`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ message: caption, link: url, access_token: env.FB_PAGE_ACCESS_TOKEN }).toString(),
-    });
-  } catch (e) { /* fail quietly, listing already live regardless */ }
+  const imageUrl = await pickSocialImage(record, env);
 
   try {
-    // Instagram requires an image — reuse a fixed branded photo for now
+    // Facebook Page post — post the picked/uploaded photo directly with the
+    // caption. Falls back to a plain text+link post if the photo post fails
+    // for any reason, so a listing never fails to post over an image issue.
+    const photoRes = await fetch(`https://graph.facebook.com/v19.0/${env.FB_PAGE_ID}/photos`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ url: imageUrl, caption, access_token: env.FB_PAGE_ACCESS_TOKEN }).toString(),
+    });
+    if (!photoRes.ok) throw new Error('FB photo post failed');
+  } catch (e) {
+    try {
+      await fetch(`https://graph.facebook.com/v19.0/${env.FB_PAGE_ID}/feed`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ message: caption, link: url, access_token: env.FB_PAGE_ACCESS_TOKEN }).toString(),
+      });
+    } catch (e2) { /* fail quietly, listing already live regardless */ }
+  }
+
+  try {
+    // Instagram requires an image — uses the same picked/uploaded photo as Facebook
     if (env.IG_USER_ID) {
-      const imageUrl = `${env.SITE_URL}/${isJob ? 'job-board-hero.jpg' : 'shift-cover-hero.jpg'}`;
       const createRes = await fetch(`https://graph.facebook.com/v19.0/${env.IG_USER_ID}/media`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
