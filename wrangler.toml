@@ -1,6 +1,6 @@
-name = "fdc-c-price"
+name = "fdc-roast-assistant"
 main = "worker.js"
 compatibility_date = "2026-07-25"
 
-# API_NINJAS_KEY is set as a secret, not here — run:
-#   npx wrangler secret put API_NINJAS_KEY
+# ANTHROPIC_API_KEY is set as a secret, not here — run:
+#   npx wrangler secret put ANTHROPIC_API_KEY
