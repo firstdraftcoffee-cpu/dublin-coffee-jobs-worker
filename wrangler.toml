@@ -4,3 +4,6 @@ compatibility_date = "2026-07-25"
 
 # ANTHROPIC_API_KEY is set as a secret, not here — run:
 #   npx wrangler secret put ANTHROPIC_API_KEY
+[[kv_namespaces]]
+binding = "FDC_STORE"
+id = "b0c80912b53c4118a42af67a9ec29c34"
