@@ -1,4 +1,4 @@
-name = "fdc-roast-assistant"
+name = "cv-review"
 main = "worker.js"
 compatibility_date = "2026-07-25"
 
