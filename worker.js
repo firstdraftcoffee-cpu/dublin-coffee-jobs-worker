@@ -198,6 +198,13 @@ Respond ONLY with a JSON object (no markdown, no backticks, no overall score —
             await env.FDC_STORE.put(`cvreview:${id}`, JSON.stringify(record), { expirationTtl: 60 * 60 * 24 });
             return jsonResponse({ status: 'done', result }, 200, ALLOWED_ORIGIN);
           } catch (e) {
+            console.error('Full review generation failed:', String(e));
+            record.attempts = (record.attempts || 0) + 1;
+            record.lastError = String(e);
+            await env.FDC_STORE.put(`cvreview:${id}`, JSON.stringify(record), { expirationTtl: 60 * 60 * 24 });
+            if (record.attempts >= 3) {
+              return jsonResponse({ status: 'error', error: 'We hit a problem generating your review. Please contact us and we\'ll sort it out — your payment is confirmed either way.' }, 200, ALLOWED_ORIGIN);
+            }
             return jsonResponse({ status: 'paid' }, 200, ALLOWED_ORIGIN); // still working on it, frontend will poll again
           }
         }
@@ -352,7 +359,12 @@ Brew method: ${method}. Problem: ${issue}`;
                   record.status = 'done';
                   record.result = result;
                   await env.FDC_STORE.put(`cvreview:${reviewId}`, JSON.stringify(record), { expirationTtl: 60 * 60 * 24 });
-                } catch (e) { /* leave status as 'paid' — the polling endpoint will retry generation as a fallback */ }
+                } catch (e) {
+                  console.error('Background full review generation failed:', String(e));
+                  record.lastError = String(e);
+                  await env.FDC_STORE.put(`cvreview:${reviewId}`, JSON.stringify(record), { expirationTtl: 60 * 60 * 24 });
+                  /* leave status as 'paid' — the polling endpoint will retry generation as a fallback */
+                }
               })());
             }
           } else if (session.mode === 'subscription') {
@@ -517,7 +529,7 @@ async function callClaude(prompt, env) {
     },
     body: JSON.stringify({
       model: 'claude-sonnet-5',
-      max_tokens: 2000,
+      max_tokens: 4000,
       messages: [{ role: 'user', content: prompt }]
     })
   });
