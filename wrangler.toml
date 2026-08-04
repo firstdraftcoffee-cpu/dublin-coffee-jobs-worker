@@ -1,12 +1,14 @@
-[vars]
-SITE_URL = "https://dublincoffeejobs.com"
-ALERT_EMAIL_TO = "your-firstdraftcoffee@gmail.com"
-name = "fdc-roast-assistant"
+name = "cv-review"
 main = "worker.js"
 compatibility_date = "2026-07-25"
 
-# ANTHROPIC_API_KEY is set as a secret, not here — run:
-#   npx wrangler secret put ANTHROPIC_API_KEY
+[vars]
+SITE_URL = "https://dublincoffeejobs.com"
+ALERT_EMAIL_TO = "your-firstdraftcoffee@gmail.com"
+
 [[kv_namespaces]]
 binding = "FDC_STORE"
 id = "b0c80912b53c4118a42af67a9ec29c34"
+
+# ANTHROPIC_API_KEY is set as a secret, not here — run:
+#   npx wrangler secret put ANTHROPIC_API_KEY
