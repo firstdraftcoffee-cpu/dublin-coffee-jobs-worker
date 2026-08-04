@@ -1,3 +1,6 @@
+[vars]
+SITE_URL = "https://dublincoffeejobs.com"
+ALERT_EMAIL_TO = "your-firstdraftcoffee@gmail.com"
 name = "fdc-roast-assistant"
 main = "worker.js"
 compatibility_date = "2026-07-25"
