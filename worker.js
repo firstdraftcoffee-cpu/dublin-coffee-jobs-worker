@@ -186,19 +186,20 @@ Respond ONLY with a JSON object (no markdown, no backticks, no overall score —
         if (record.status === 'pending') return jsonResponse({ status: 'pending' }, 200, ALLOWED_ORIGIN);
 
         if (record.status === 'paid') {
-          const prompt = `You are an expert recruiter specialising in the Irish coffee and hospitality industry, working nationwide (not just Dublin).
-${IRISH_HOSPITALITY_KNOWLEDGE}
-Give a detailed, line-by-line review of this CV for someone applying for a ${record.role || 'barista'} role. Be specific and practical — ground your feedback in the real pay bands, certifications, and standout factors above rather than generic advice. Never let the cause of a gap, non-native English phrasing, age, gender, disability, or immigration status affect any feedback, concern, or question. Stay encouraging in tone throughout.
-CV: ${record.cv}
-Respond ONLY with a JSON object (no markdown, no backticks):
-{"lineNotes":["specific note on one part of the CV","...","..."],"rewrittenSummary":"<a rewritten 2-4 sentence professional summary/personal statement for this candidate, ready to paste at the top of their CV>","potentialConcerns":["a genuine, fair concern an employer might raise, stated neutrally without speculating on cause","...","..."],"estimatedSalary":"<a realistic Irish pay range for this candidate right now, using the pay bands above>","interviewQuestions":["a targeted interview question this candidate should prepare for, based on their specific CV","...","...","...","..."]}`;
-          const data = await callClaude(prompt, env);
-          const text = data.content.map(i => i.text || '').join('');
-          const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
-          record.status = 'done';
-          record.result = parsed;
-          await env.FDC_STORE.put(`cvreview:${id}`, JSON.stringify(record), { expirationTtl: 60 * 60 * 24 });
-          return jsonResponse({ status: 'done', result: parsed }, 200, ALLOWED_ORIGIN);
+          // Normally the webhook already kicked off generation in the
+          // background the moment payment succeeded (see /webhook/stripe),
+          // so this is mainly a fallback in case that hasn't finished yet —
+          // running it here too means the review still completes even if
+          // the background job was slow or didn't fire.
+          try {
+            const result = await generateFullReviewResult(record, env);
+            record.status = 'done';
+            record.result = result;
+            await env.FDC_STORE.put(`cvreview:${id}`, JSON.stringify(record), { expirationTtl: 60 * 60 * 24 });
+            return jsonResponse({ status: 'done', result }, 200, ALLOWED_ORIGIN);
+          } catch (e) {
+            return jsonResponse({ status: 'paid' }, 200, ALLOWED_ORIGIN); // still working on it, frontend will poll again
+          }
         }
 
         return jsonResponse({ status: 'done', result: record.result }, 200, ALLOWED_ORIGIN);
@@ -341,6 +342,18 @@ Brew method: ${method}. Problem: ${issue}`;
               const record = JSON.parse(raw);
               record.status = 'paid';
               await env.FDC_STORE.put(`cvreview:${reviewId}`, JSON.stringify(record), { expirationTtl: 60 * 60 * 24 });
+              // Start generating the full review right now, in the background,
+              // rather than waiting for the page to poll for it — by the time
+              // the customer's browser redirects back and starts polling, the
+              // review is often already done or very close to it.
+              ctx.waitUntil((async () => {
+                try {
+                  const result = await generateFullReviewResult(record, env);
+                  record.status = 'done';
+                  record.result = result;
+                  await env.FDC_STORE.put(`cvreview:${reviewId}`, JSON.stringify(record), { expirationTtl: 60 * 60 * 24 });
+                } catch (e) { /* leave status as 'paid' — the polling endpoint will retry generation as a fallback */ }
+              })());
             }
           } else if (session.mode === 'subscription') {
             const subscriberEmail = session.customer_email || session.customer_details?.email;
@@ -518,6 +531,18 @@ async function callClaude(prompt, env) {
     throw new Error('Claude API error: ' + JSON.stringify(data));
   }
   return data;
+}
+
+async function generateFullReviewResult(record, env) {
+  const prompt = `You are an expert recruiter specialising in the Irish coffee and hospitality industry, working nationwide (not just Dublin).
+${IRISH_HOSPITALITY_KNOWLEDGE}
+Give a detailed, line-by-line review of this CV for someone applying for a ${record.role || 'barista'} role. Be specific and practical — ground your feedback in the real pay bands, certifications, and standout factors above rather than generic advice. Never let the cause of a gap, non-native English phrasing, age, gender, disability, or immigration status affect any feedback, concern, or question. Stay encouraging in tone throughout.
+CV: ${record.cv}
+Respond ONLY with a JSON object (no markdown, no backticks):
+{"lineNotes":["specific note on one part of the CV","...","..."],"rewrittenSummary":"<a rewritten 2-4 sentence professional summary/personal statement for this candidate, ready to paste at the top of their CV>","potentialConcerns":["a genuine, fair concern an employer might raise, stated neutrally without speculating on cause","...","..."],"estimatedSalary":"<a realistic Irish pay range for this candidate right now, using the pay bands above>","interviewQuestions":["a targeted interview question this candidate should prepare for, based on their specific CV","...","...","...","..."]}`;
+  const data = await callClaude(prompt, env);
+  const text = data.content.map(i => i.text || '').join('');
+  return JSON.parse(text.replace(/```json|```/g, '').trim());
 }
 
 function jsonResponse(data, status, origin) {
