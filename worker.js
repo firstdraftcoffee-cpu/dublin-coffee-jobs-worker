@@ -730,7 +730,7 @@ async function notifyGroupPost(record, env) {
 // Picks the image used for a social post. If the listing supplied its own
 // image (data.imageUrl, e.g. a photo the employer/venue uploaded), that's
 // used as-is. Otherwise this rotates through a fixed set of SOCIAL_IMAGE_COUNT
-// images stored at ${SITE_URL}/social/1.jpg ... /social/N.jpg, so posts don't
+// images stored at ${SITE_URL}/1.jpg ... /N.jpg, so posts don't
 // all look identical. The rotation position is kept in FDC_STORE so it
 // advances across requests/deployments rather than resetting each time.
 const SOCIAL_IMAGE_COUNT = 66;
@@ -743,7 +743,7 @@ async function pickSocialImage(record, env) {
   const current = raw ? parseInt(raw, 10) : 0;
   const index = (current % SOCIAL_IMAGE_COUNT) + 1; // 1-based filenames
   await env.FDC_STORE.put('social:image-counter', String(current + 1));
-  return `${env.SITE_URL}/social/${index}.jpg`;
+  return `${env.SITE_URL}/${index}.jpg`;
 }
 
 // Cross-posts a newly published job or shift-need listing to the Facebook
