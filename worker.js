@@ -8,11 +8,12 @@
 //   Secret         : ANTHROPIC_API_KEY   (already set)
 //   Secret         : STRIPE_SECRET_KEY   (from Stripe dashboard)
 //   Secret         : STRIPE_WEBHOOK_SECRET (from Stripe webhook setup)
+//   Secret         : RESEND_API_KEY      (from Resend dashboard)
 //   Secret         : ADMIN_TOKEN         (any long random string you pick —
 //                                         used to authorise hide/remove actions
 //                                         from the alert email links)
 //   Variable       : ALERT_EMAIL_TO      (your inbox, e.g. ger@firstdraftcoffee.net)
-//   Variable       : SITE_URL            (e.g. https://firstdraftcoffee.net)
+//   Variable       : SITE_URL            (e.g. https://dublincoffeejobs.com)
 //
 // STRIPE SETUP:
 //   1. Create two Prices in Stripe dashboard (or create Products+Prices via API):
@@ -369,9 +370,12 @@ Brew method: ${method}. Problem: ${issue}`;
             }
           } else if (session.mode === 'subscription') {
             const subscriberEmail = session.customer_email || session.customer_details?.email;
+            console.log('Subscription webhook — subscriberEmail:', subscriberEmail);
             if (subscriberEmail) {
               ctx.waitUntil(sendEmailTo(env, subscriberEmail, 'Your Dublin Coffee Jobs subscription is active',
                 `Thanks for subscribing to unlimited job posts on Dublin Coffee Jobs.\n\nYour subscription is now active. From here:\n\n- Post as many jobs as you like at ${env.SITE_URL}/job-board.html — use this same email address (${subscriberEmail}) each time and it'll publish free automatically, no checkout needed.\n- Add a logo URL when posting and it'll show on your listings.\n- Manage or cancel any time from the receipt/invoice email Stripe sends separately, or by contacting us directly.\n\nQuestions — just reply to this email.`));
+            } else {
+              console.error('Subscription webhook fired but no subscriberEmail found on session — email not sent.');
             }
           }
         }
@@ -801,15 +805,17 @@ async function postToSocial(record, env) {
   } catch (e) { /* fail quietly, listing already live regardless */ }
 }
 
-// Sends an email to any address — used for saved-search alert digests and
-// job applications. Pass replyTo so the recipient can reply straight to
-// the candidate rather than to the noreply alerts address.
 // Sends an email to any address via Resend — used for saved-search alert
 // digests and job applications. Pass replyTo so the recipient can reply
 // straight to the candidate rather than to the noreply alerts address.
 // Requires the RESEND_API_KEY secret and firstdraftcoffee.net verified as
 // a sending domain in the Resend dashboard (MailChannels' free Cloudflare
 // Workers service was shut down in August 2024, so this replaces it).
+//
+// IMPORTANT: this now checks the response and logs the outcome either way
+// (visible in Cloudflare's Observability → Events log), since previously a
+// rejected send (bad key, unverified domain, validation error) failed
+// completely silently with no error anywhere.
 async function sendEmailTo(env, to, subject, text, replyTo) {
   const payload = {
     from: 'Dublin Coffee Jobs <alerts@firstdraftcoffee.net>',
@@ -818,29 +824,52 @@ async function sendEmailTo(env, to, subject, text, replyTo) {
     text,
   };
   if (replyTo) payload.reply_to = replyTo;
-  await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${env.RESEND_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(payload),
-  });
+  try {
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${env.RESEND_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const errBody = await res.text();
+      console.error('Resend send FAILED:', res.status, errBody, 'to:', to, 'subject:', subject);
+    } else {
+      const okBody = await res.json();
+      console.log('Resend send OK:', to, subject, JSON.stringify(okBody));
+    }
+  } catch (e) {
+    console.error('Resend send threw an exception:', String(e), 'to:', to, 'subject:', subject);
+  }
 }
 
 // Sends an alert email to Ger via Resend (flag/report notifications, etc.)
+// Same logging treatment as sendEmailTo above.
 async function sendAlertEmail(env, { subject, text }) {
-  await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${env.RESEND_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      from: 'Dublin Coffee Jobs Alerts <alerts@firstdraftcoffee.net>',
-      to: [env.ALERT_EMAIL_TO],
-      subject,
-      text,
-    }),
-  });
+  try {
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${env.RESEND_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        from: 'Dublin Coffee Jobs Alerts <alerts@firstdraftcoffee.net>',
+        to: [env.ALERT_EMAIL_TO],
+        subject,
+        text,
+      }),
+    });
+    if (!res.ok) {
+      const errBody = await res.text();
+      console.error('Resend alert send FAILED:', res.status, errBody, 'subject:', subject);
+    } else {
+      const okBody = await res.json();
+      console.log('Resend alert send OK:', subject, JSON.stringify(okBody));
+    }
+  } catch (e) {
+    console.error('Resend alert send threw an exception:', String(e), 'subject:', subject);
+  }
 }
