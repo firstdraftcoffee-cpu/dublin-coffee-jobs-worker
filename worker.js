@@ -804,33 +804,43 @@ async function postToSocial(record, env) {
 // Sends an email to any address — used for saved-search alert digests and
 // job applications. Pass replyTo so the recipient can reply straight to
 // the candidate rather than to the noreply alerts address.
+// Sends an email to any address via Resend — used for saved-search alert
+// digests and job applications. Pass replyTo so the recipient can reply
+// straight to the candidate rather than to the noreply alerts address.
+// Requires the RESEND_API_KEY secret and firstdraftcoffee.net verified as
+// a sending domain in the Resend dashboard (MailChannels' free Cloudflare
+// Workers service was shut down in August 2024, so this replaces it).
 async function sendEmailTo(env, to, subject, text, replyTo) {
   const payload = {
-    personalizations: [{ to: [{ email: to }] }],
-    from: { email: 'alerts@firstdraftcoffee.net', name: 'Dublin Coffee Jobs' },
+    from: 'Dublin Coffee Jobs <alerts@firstdraftcoffee.net>',
+    to: [to],
     subject,
-    content: [{ type: 'text/plain', value: text }],
+    text,
   };
-  if (replyTo) payload.reply_to = { email: replyTo };
-  await fetch('https://api.mailchannels.net/tx/v1/send', {
+  if (replyTo) payload.reply_to = replyTo;
+  await fetch('https://api.resend.com/emails', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Authorization': `Bearer ${env.RESEND_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
     body: JSON.stringify(payload),
   });
 }
 
-// Sends an alert email via MailChannels — free on Cloudflare Workers,
-// requires SPF/DKIM records on firstdraftcoffee.net (one-time DNS setup,
-// see README-setup.md). No API key needed.
+// Sends an alert email to Ger via Resend (flag/report notifications, etc.)
 async function sendAlertEmail(env, { subject, text }) {
-  await fetch('https://api.mailchannels.net/tx/v1/send', {
+  await fetch('https://api.resend.com/emails', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Authorization': `Bearer ${env.RESEND_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
     body: JSON.stringify({
-      personalizations: [{ to: [{ email: env.ALERT_EMAIL_TO }] }],
-      from: { email: 'alerts@firstdraftcoffee.net', name: 'Dublin Coffee Jobs — Alerts' },
+      from: 'Dublin Coffee Jobs Alerts <alerts@firstdraftcoffee.net>',
+      to: [env.ALERT_EMAIL_TO],
       subject,
-      content: [{ type: 'text/plain', value: text }],
+      text,
     }),
   });
 }
