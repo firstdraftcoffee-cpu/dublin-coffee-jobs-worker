@@ -824,6 +824,7 @@ async function sendEmailTo(env, to, subject, text, replyTo) {
     text,
   };
   if (replyTo) payload.reply_to = replyTo;
+  console.log('DEBUG RESEND_API_KEY check:', 'present=' + !!env.RESEND_API_KEY, 'length=' + (env.RESEND_API_KEY ? env.RESEND_API_KEY.length : 0), 'starts=' + (env.RESEND_API_KEY ? env.RESEND_API_KEY.slice(0,5) : 'n/a'));
   try {
     const res = await fetch('https://api.resend.com/emails', {
       method: 'POST',
