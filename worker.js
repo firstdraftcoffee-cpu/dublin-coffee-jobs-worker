@@ -464,16 +464,83 @@ Brew method: ${method}. Problem: ${issue}`;
 
       // ── NEW: APPLY — sends the application by email server-side, so a
       // candidate's CV (pasted once, remembered in their browser) doesn't
-      // need re-attaching for every job ──
+      // need re-attaching for every job. Also stores the application (with
+      // a job-specific match score, unless the employer opted out) so the
+      // employer can view a ranked shortlist later at /applicants ──
       if (path === '/apply' && request.method === 'POST') {
-        const { employerEmail, name, candidateEmail, role, about, cv, jobTitle } = await request.json();
+        const { employerEmail, name, candidateEmail, role, about, cv, jobTitle, listingId } = await request.json();
         if (!employerEmail || !name || !candidateEmail) {
           return jsonResponse({ error: 'Missing required fields' }, 400, ALLOWED_ORIGIN);
         }
+
+        let score = null;
+        let highlights = null;
+        let skipScoring = false;
+        let jobDesc = '';
+        if (listingId) {
+          const listingRaw = await env.FDC_STORE.get(`listing:${listingId}`);
+          if (listingRaw) {
+            const listing = JSON.parse(listingRaw);
+            skipScoring = !!listing.data.skipScoring;
+            jobDesc = listing.data.desc || '';
+          }
+        }
+
+        if (!skipScoring && cv && cv.length >= 50) {
+          try {
+            const result = await scoreApplicantForJob({ cv, role, about, jobTitle: jobTitle || 'this role', jobDesc }, env);
+            score = result.score;
+            highlights = result.highlights;
+          } catch (e) { /* scoring is a nice-to-have — application still goes through without it */ }
+        }
+
+        if (listingId) {
+          const appId = crypto.randomUUID();
+          const application = {
+            id: appId, listingId, name, candidateEmail, role, about, cv,
+            jobTitle: jobTitle || '', score, highlights, skipScoring,
+            appliedAt: Date.now(),
+          };
+          await env.FDC_STORE.put(`application:${listingId}:${appId}`, JSON.stringify(application), { expirationTtl: 60 * 60 * 24 * 45 });
+        }
+
         const subject = `Application: ${jobTitle || 'Role'} — ${name}`;
-        const text = `New application via Dublin Coffee Jobs\n\nRole: ${jobTitle || ''}\nName: ${name}\nEmail: ${candidateEmail}\nRole/experience: ${role || ''}\n${about ? '\nNote: ' + about + '\n' : ''}\n${cv ? '\n--- CV ---\n' + cv + '\n' : '\n(No CV text provided)\n'}`;
+        const scoreLine = score !== null ? `\nMatch score for this role: ${score}/100\n${(highlights || []).map(h => '- ' + h).join('\n')}\n` : '';
+        const text = `New application via Dublin Coffee Jobs\n\nRole: ${jobTitle || ''}\nName: ${name}\nEmail: ${candidateEmail}\nRole/experience: ${role || ''}\n${scoreLine}${about ? '\nNote: ' + about + '\n' : ''}\n${cv ? '\n--- CV ---\n' + cv + '\n' : '\n(No CV text provided)\n'}${listingId ? `\nView the full shortlist for this job: ${env.SITE_URL}/applicants.html?listingId=${listingId}&email=${encodeURIComponent(employerEmail)}\n` : ''}`;
         await sendEmailTo(env, employerEmail, subject, text, candidateEmail);
-        return jsonResponse({ sent: true }, 200, ALLOWED_ORIGIN);
+        return jsonResponse({ sent: true, score }, 200, ALLOWED_ORIGIN);
+      }
+
+      // ── NEW: APPLICANT SHORTLIST — employer views ranked applicants for
+      // their own listing. No accounts: the employer's email must match the
+      // application email on file for that listing, same lightweight
+      // pattern already used for subscriptions ──
+      if (path === '/applicants' && request.method === 'GET') {
+        const listingId = url.searchParams.get('listingId');
+        const email = url.searchParams.get('email');
+        if (!listingId || !email) return jsonResponse({ error: 'Missing listingId or email' }, 400, ALLOWED_ORIGIN);
+
+        const listingRaw = await env.FDC_STORE.get(`listing:${listingId}`);
+        if (!listingRaw) return jsonResponse({ error: 'Listing not found or expired' }, 404, ALLOWED_ORIGIN);
+        const listing = JSON.parse(listingRaw);
+        if ((listing.data.email || '').toLowerCase() !== email.toLowerCase()) {
+          return jsonResponse({ error: 'That email doesn\'t match the one this job was posted under' }, 403, ALLOWED_ORIGIN);
+        }
+
+        const list = await env.FDC_STORE.list({ prefix: `application:${listingId}:` });
+        const applicants = [];
+        for (const key of list.keys) {
+          const raw = await env.FDC_STORE.get(key.name);
+          if (raw) applicants.push(JSON.parse(raw));
+        }
+        applicants.sort((a, b) => {
+          if (a.score === null && b.score === null) return b.appliedAt - a.appliedAt;
+          if (a.score === null) return 1;
+          if (b.score === null) return -1;
+          return b.score - a.score;
+        });
+
+        return jsonResponse({ jobTitle: listing.data.title, skipScoring: !!listing.data.skipScoring, applicants }, 200, ALLOWED_ORIGIN);
       }
 
       return jsonResponse({ error: 'Unknown endpoint' }, 404, ALLOWED_ORIGIN);
@@ -519,7 +586,7 @@ Brew method: ${method}. Problem: ${issue}`;
 
 // ── HELPERS ──────────────────────────────────────────────────────
 
-async function callClaude(prompt, env) {
+async function callClaude(prompt, env, maxTokens) {
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -529,7 +596,7 @@ async function callClaude(prompt, env) {
     },
     body: JSON.stringify({
       model: 'claude-sonnet-5',
-      max_tokens: 4000,
+      max_tokens: maxTokens || 4000,
       messages: [{ role: 'user', content: prompt }]
     })
   });
@@ -553,6 +620,24 @@ CV: ${record.cv}
 Respond ONLY with a JSON object (no markdown, no backticks):
 {"lineNotes":["specific note on one part of the CV","...","..."],"rewrittenSummary":"<a rewritten 2-4 sentence professional summary/personal statement for this candidate, ready to paste at the top of their CV>","potentialConcerns":["a genuine, fair concern an employer might raise, stated neutrally without speculating on cause","...","..."],"estimatedSalary":"<a realistic Irish pay range for this candidate right now, using the pay bands above>","interviewQuestions":["a targeted interview question this candidate should prepare for, based on their specific CV","...","...","...","..."]}`;
   const data = await callClaude(prompt, env);
+  const text = data.content.map(i => i.text || '').join('');
+  return JSON.parse(text.replace(/```json|```/g, '').trim());
+}
+
+// Scores a single applicant's CV against one specific job (not a generic
+// role template) — used to build the employer's ranked shortlist. Kept
+// deliberately lightweight (short prompt, small max_tokens) since this runs
+// on every application, not just when someone asks for a review.
+async function scoreApplicantForJob({ cv, role, about, jobTitle, jobDesc }, env) {
+  const prompt = `You are screening a job application for an Irish hospitality/coffee employer. Score how well this specific candidate fits this specific role — not a generic template.
+Role applied for: ${jobTitle}
+${jobDesc ? `Role description: ${jobDesc}` : ''}
+Candidate's stated role/experience: ${role || 'not given'}
+Candidate's note: ${about || 'none'}
+Candidate's CV: ${cv}
+Score 0-100 on fit for this exact role, and give 2-3 short highlight bullets (max ~12 words each) an employer could scan in a few seconds — the most relevant strengths or flags for this specific role. Never let a gap's cause, non-native English phrasing, age, gender, disability, or immigration status affect the score.
+Respond ONLY with JSON, no markdown: {"score":<0-100>,"highlights":["...","...","..."]}`;
+  const data = await callClaude(prompt, env, 500);
   const text = data.content.map(i => i.text || '').join('');
   return JSON.parse(text.replace(/```json|```/g, '').trim());
 }
