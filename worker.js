@@ -466,6 +466,33 @@ Brew method: ${method}. Problem: ${issue}`;
         return new Response('Listing restored to the board. You can close this tab.', { status: 200 });
       }
 
+      // ── NEW: ADMIN — EDIT ANY LISTING. Same idea as the customer-facing
+      // /listings/edit, but authorised by the ADMIN_TOKEN secret instead of
+      // an email match, so Ger can update any listing on the employer's
+      // behalf without needing their email.
+      if (path === '/admin/listing' && request.method === 'GET') {
+        const id = url.searchParams.get('id');
+        const token = url.searchParams.get('token');
+        if (token !== env.ADMIN_TOKEN) return jsonResponse({ error: 'Forbidden' }, 403, ALLOWED_ORIGIN);
+        if (!id) return jsonResponse({ error: 'Missing id' }, 400, ALLOWED_ORIGIN);
+        const raw = await env.FDC_STORE.get(`listing:${id}`);
+        if (!raw) return jsonResponse({ error: 'Listing not found or expired' }, 404, ALLOWED_ORIGIN);
+        return jsonResponse({ record: JSON.parse(raw) }, 200, ALLOWED_ORIGIN);
+      }
+      if (path === '/admin/listing' && request.method === 'POST') {
+        const { id, token, data } = await request.json();
+        if (token !== env.ADMIN_TOKEN) return jsonResponse({ error: 'Forbidden' }, 403, ALLOWED_ORIGIN);
+        if (!id || !data) return jsonResponse({ error: 'Missing id or data' }, 400, ALLOWED_ORIGIN);
+        const raw = await env.FDC_STORE.get(`listing:${id}`);
+        if (!raw) return jsonResponse({ error: 'Listing not found or expired' }, 404, ALLOWED_ORIGIN);
+        const record = JSON.parse(raw);
+        record.data = { ...record.data, ...data, email: record.data.email };
+        record.editedAt = Date.now();
+        const remainingTtl = record.expiresAt ? Math.max(60, Math.floor((record.expiresAt - Date.now()) / 1000)) : 60 * 60 * 24 * 14;
+        await env.FDC_STORE.put(`listing:${id}`, JSON.stringify(record), { expirationTtl: remainingTtl });
+        return jsonResponse({ saved: true }, 200, ALLOWED_ORIGIN);
+      }
+
       // ── NEW: APPLY — sends the application by email server-side, so a
       // candidate's CV (pasted once, remembered in their browser) doesn't
       // need re-attaching for every job. Also stores the application (with
@@ -546,7 +573,8 @@ Brew method: ${method}. Problem: ${issue}`;
 
         return jsonResponse({ jobTitle: listing.data.title, skipScoring: !!listing.data.skipScoring, applicants }, 200, ALLOWED_ORIGIN);
       }
-// ── NEW: IMAGE UPLOAD — accepts a file, stores it in R2, returns a
+
+      // ── NEW: IMAGE UPLOAD — accepts a file, stores it in R2, returns a
       // public URL. Used by the drag-and-drop widget on job-board.html and
       // shift-cover.html so employers can upload a logo/photo directly
       // instead of pasting a URL to an image hosted elsewhere.
@@ -565,6 +593,44 @@ Brew method: ${method}. Problem: ${issue}`;
         const url = `${env.R2_PUBLIC_URL}/${key}`;
         return jsonResponse({ url }, 200, ALLOWED_ORIGIN);
       }
+
+      // ── NEW: EDIT LISTING — fetch — employer looks up their own listing
+      // by listing ID + the email they posted it under (same no-accounts
+      // pattern as /applicants and subscriptions) so they can edit it in
+      // the same posting form rather than creating a brand new paid post.
+      if (path === '/listings/edit' && request.method === 'GET') {
+        const id = url.searchParams.get('id');
+        const email = url.searchParams.get('email');
+        if (!id || !email) return jsonResponse({ error: 'Missing id or email' }, 400, ALLOWED_ORIGIN);
+        const raw = await env.FDC_STORE.get(`listing:${id}`);
+        if (!raw) return jsonResponse({ error: 'Listing not found or expired' }, 404, ALLOWED_ORIGIN);
+        const record = JSON.parse(raw);
+        if ((record.data.email || '').toLowerCase() !== email.toLowerCase()) {
+          return jsonResponse({ error: 'That email doesn\'t match the one this listing was posted under' }, 403, ALLOWED_ORIGIN);
+        }
+        return jsonResponse({ record }, 200, ALLOWED_ORIGIN);
+      }
+
+      // ── NEW: EDIT LISTING — save. Same email-match check, then
+      // overwrites the listing's data in place. Preserves the original
+      // expiry (posting time / tier already paid for isn't affected by an
+      // edit) rather than resetting the countdown.
+      if (path === '/listings/edit' && request.method === 'POST') {
+        const { id, email, data } = await request.json();
+        if (!id || !email || !data) return jsonResponse({ error: 'Missing id, email, or data' }, 400, ALLOWED_ORIGIN);
+        const raw = await env.FDC_STORE.get(`listing:${id}`);
+        if (!raw) return jsonResponse({ error: 'Listing not found or expired' }, 404, ALLOWED_ORIGIN);
+        const record = JSON.parse(raw);
+        if ((record.data.email || '').toLowerCase() !== email.toLowerCase()) {
+          return jsonResponse({ error: 'That email doesn\'t match the one this listing was posted under' }, 403, ALLOWED_ORIGIN);
+        }
+        record.data = { ...record.data, ...data, email: record.data.email };
+        record.editedAt = Date.now();
+        const remainingTtl = record.expiresAt ? Math.max(60, Math.floor((record.expiresAt - Date.now()) / 1000)) : 60 * 60 * 24 * 14;
+        await env.FDC_STORE.put(`listing:${id}`, JSON.stringify(record), { expirationTtl: remainingTtl });
+        return jsonResponse({ saved: true }, 200, ALLOWED_ORIGIN);
+      }
+
       return jsonResponse({ error: 'Unknown endpoint' }, 404, ALLOWED_ORIGIN);
 
     } catch (err) {
@@ -842,7 +908,6 @@ async function sendEmailTo(env, to, subject, text, replyTo) {
     text,
   };
   if (replyTo) payload.reply_to = replyTo;
-  console.log('DEBUG RESEND_API_KEY check:', 'present=' + !!env.RESEND_API_KEY, 'length=' + (env.RESEND_API_KEY ? env.RESEND_API_KEY.length : 0), 'starts=' + (env.RESEND_API_KEY ? env.RESEND_API_KEY.slice(0,5) : 'n/a'));
   try {
     const res = await fetch('https://api.resend.com/emails', {
       method: 'POST',
