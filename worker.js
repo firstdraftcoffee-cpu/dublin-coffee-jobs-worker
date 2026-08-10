@@ -546,7 +546,25 @@ Brew method: ${method}. Problem: ${issue}`;
 
         return jsonResponse({ jobTitle: listing.data.title, skipScoring: !!listing.data.skipScoring, applicants }, 200, ALLOWED_ORIGIN);
       }
-
+// ── NEW: IMAGE UPLOAD — accepts a file, stores it in R2, returns a
+      // public URL. Used by the drag-and-drop widget on job-board.html and
+      // shift-cover.html so employers can upload a logo/photo directly
+      // instead of pasting a URL to an image hosted elsewhere.
+      if (path === '/upload/image' && request.method === 'POST') {
+        const contentType = request.headers.get('content-type') || '';
+        if (!contentType.startsWith('image/')) {
+          return jsonResponse({ error: 'Only image files are allowed' }, 400, ALLOWED_ORIGIN);
+        }
+        const bytes = await request.arrayBuffer();
+        if (bytes.byteLength > 8 * 1024 * 1024) {
+          return jsonResponse({ error: 'Image must be under 8MB' }, 400, ALLOWED_ORIGIN);
+        }
+        const ext = contentType.split('/')[1]?.split('+')[0] || 'jpg';
+        const key = `uploads/${crypto.randomUUID()}.${ext}`;
+        await env.FDC_UPLOADS.put(key, bytes, { httpMetadata: { contentType } });
+        const url = `${env.R2_PUBLIC_URL}/${key}`;
+        return jsonResponse({ url }, 200, ALLOWED_ORIGIN);
+      }
       return jsonResponse({ error: 'Unknown endpoint' }, 404, ALLOWED_ORIGIN);
 
     } catch (err) {
