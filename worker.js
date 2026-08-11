@@ -502,6 +502,26 @@ Brew method: ${method}. Problem: ${issue}`;
           return jsonResponse({ error: 'Missing required fields' }, 400, ALLOWED_ORIGIN);
         }
 
+        // ── DUPLICATE GUARD — one email per applicant per job, no matter
+        // how many times this endpoint gets hit. This is what actually
+        // stops the multi-email problem: a slow/impatient double-click,
+        // a flaky connection retry, or anything else that fires this
+        // request more than once for the same person applying to the
+        // same listing. Checked BEFORE scoring or sending anything, so a
+        // second request is a genuine no-op — no duplicate email, no
+        // duplicate record, no wasted AI call.
+        if (listingId) {
+          const existing = await env.FDC_STORE.list({ prefix: `application:${listingId}:` });
+          for (const key of existing.keys) {
+            const raw = await env.FDC_STORE.get(key.name);
+            if (!raw) continue;
+            const app = JSON.parse(raw);
+            if ((app.candidateEmail || '').toLowerCase() === candidateEmail.toLowerCase()) {
+              return jsonResponse({ sent: true, score: app.score, alreadyApplied: true }, 200, ALLOWED_ORIGIN);
+            }
+          }
+        }
+
         let score = null;
         let highlights = null;
         let skipScoring = false;
