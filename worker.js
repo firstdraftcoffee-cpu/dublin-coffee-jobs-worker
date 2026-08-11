@@ -285,7 +285,7 @@ Brew method: ${method}. Problem: ${issue}`;
           cancelUrl: `${env.SITE_URL}/posted?cancelled=1`,
         }, env);
 
-        return jsonResponse({ checkoutUrl: session.url }, 200, ALLOWED_ORIGIN);
+        return jsonResponse({ checkoutUrl: session.url, id }, 200, ALLOWED_ORIGIN);
       }
 
       // ── NEW: SUBSCRIBE — unlimited job posts for a flat monthly price ──
@@ -486,20 +486,18 @@ Brew method: ${method}. Problem: ${issue}`;
         const raw = await env.FDC_STORE.get(`listing:${id}`);
         if (!raw) return jsonResponse({ error: 'Listing not found or expired' }, 404, ALLOWED_ORIGIN);
         const record = JSON.parse(raw);
-        record.data = { ...record.data, ...data, email: record.data.email };
-        record.editedAt = Date.now();
-        const remainingTtl = record.expiresAt ? Math.max(60, Math.floor((record.expiresAt - Date.now()) / 1000)) : 60 * 60 * 24 * 14;
-        await env.FDC_STORE.put(`listing:${id}`, JSON.stringify(record), { expirationTtl: remainingTtl });
-        return jsonResponse({ saved: true }, 200, ALLOWED_ORIGIN);
-      }
-
-      // ── NEW: APPLY — sends the application by email server-side, so a
+        // Note: email is intentionally allowed to change here — the
+        // employer already proved ownership by matching the *current*
+        // email above, so updating it to a new address (e.g. a dedicated
+        // jobs@ inbox instead of a personal one) is a legitimate edit.
+        record.data = { ...record.data, ...data };
+        record.editedAt = Date.now(); — sends the application by email server-side, so a
       // candidate's CV (pasted once, remembered in their browser) doesn't
       // need re-attaching for every job. Also stores the application (with
       // a job-specific match score, unless the employer opted out) so the
       // employer can view a ranked shortlist later at /applicants ──
       if (path === '/apply' && request.method === 'POST') {
-        const { employerEmail, name, candidateEmail, role, about, cv, jobTitle, listingId } = await request.json();
+        const { employerEmail, name, candidateEmail, role, about, cv, cvFileUrl, jobTitle, listingId } = await request.json();
         if (!employerEmail || !name || !candidateEmail) {
           return jsonResponse({ error: 'Missing required fields' }, 400, ALLOWED_ORIGIN);
         }
@@ -528,7 +526,7 @@ Brew method: ${method}. Problem: ${issue}`;
         if (listingId) {
           const appId = crypto.randomUUID();
           const application = {
-            id: appId, listingId, name, candidateEmail, role, about, cv,
+            id: appId, listingId, name, candidateEmail, role, about, cv, cvFileUrl: cvFileUrl || null,
             jobTitle: jobTitle || '', score, highlights, skipScoring,
             appliedAt: Date.now(),
           };
@@ -537,7 +535,8 @@ Brew method: ${method}. Problem: ${issue}`;
 
         const subject = `Application: ${jobTitle || 'Role'} — ${name}`;
         const scoreLine = score !== null ? `\nMatch score for this role: ${score}/100\n${(highlights || []).map(h => '- ' + h).join('\n')}\n` : '';
-        const text = `New application via Dublin Coffee Jobs\n\nRole: ${jobTitle || ''}\nName: ${name}\nEmail: ${candidateEmail}\nRole/experience: ${role || ''}\n${scoreLine}${about ? '\nNote: ' + about + '\n' : ''}\n${cv ? '\n--- CV ---\n' + cv + '\n' : '\n(No CV text provided)\n'}${listingId ? `\nView the full shortlist for this job: ${env.SITE_URL}/applicants.html?listingId=${listingId}&email=${encodeURIComponent(employerEmail)}\n` : ''}`;
+        const cvFileLine = cvFileUrl ? `\nAttached CV file: ${cvFileUrl}\n` : '';
+        const text = `New application via Dublin Coffee Jobs\n\nRole: ${jobTitle || ''}\nName: ${name}\nEmail: ${candidateEmail}\nRole/experience: ${role || ''}\n${scoreLine}${about ? '\nNote: ' + about + '\n' : ''}${cvFileLine}\n${cv ? '\n--- CV (pasted text) ---\n' + cv + '\n' : '\n(No CV text pasted)\n'}${listingId ? `\nView the full shortlist for this job: ${env.SITE_URL}/applicants.html?listingId=${listingId}&email=${encodeURIComponent(employerEmail)}\n` : ''}`;
         await sendEmailTo(env, employerEmail, subject, text, candidateEmail);
         return jsonResponse({ sent: true, score }, 200, ALLOWED_ORIGIN);
       }
@@ -624,11 +623,52 @@ Brew method: ${method}. Problem: ${issue}`;
         if ((record.data.email || '').toLowerCase() !== email.toLowerCase()) {
           return jsonResponse({ error: 'That email doesn\'t match the one this listing was posted under' }, 403, ALLOWED_ORIGIN);
         }
-        record.data = { ...record.data, ...data, email: record.data.email };
+        // Note: email is intentionally allowed to change here — the
+        // employer already proved ownership by matching the *current*
+        // email above, so updating it to a new address (e.g. a dedicated
+        // jobs@ inbox instead of a personal one) is a legitimate edit.
+        record.data = { ...record.data, ...data };
         record.editedAt = Date.now();
         const remainingTtl = record.expiresAt ? Math.max(60, Math.floor((record.expiresAt - Date.now()) / 1000)) : 60 * 60 * 24 * 14;
         await env.FDC_STORE.put(`listing:${id}`, JSON.stringify(record), { expirationTtl: remainingTtl });
         return jsonResponse({ saved: true }, 200, ALLOWED_ORIGIN);
+      }
+
+      // ── NEW: REMOVE AN APPLICANT — employer removes an unwanted
+      // candidate from their own shortlist. Verified the same way as
+      // /applicants (listing ID + the email it was posted under).
+      if (path === '/applicants/remove' && request.method === 'POST') {
+        const { listingId, appId, email } = await request.json();
+        if (!listingId || !appId || !email) return jsonResponse({ error: 'Missing listingId, appId, or email' }, 400, ALLOWED_ORIGIN);
+        const listingRaw = await env.FDC_STORE.get(`listing:${listingId}`);
+        if (!listingRaw) return jsonResponse({ error: 'Listing not found or expired' }, 404, ALLOWED_ORIGIN);
+        const listing = JSON.parse(listingRaw);
+        if ((listing.data.email || '').toLowerCase() !== email.toLowerCase()) {
+          return jsonResponse({ error: 'That email doesn\'t match the one this listing was posted under' }, 403, ALLOWED_ORIGIN);
+        }
+        await env.FDC_STORE.delete(`application:${listingId}:${appId}`);
+        return jsonResponse({ removed: true }, 200, ALLOWED_ORIGIN);
+      }
+
+      // ── NEW: FILE UPLOAD — for CV attachments (PDF/Word), separate from
+      // /upload/image since it needs to accept document types, not just
+      // images, and a slightly larger size limit. Stores in the same R2
+      // bucket under a documents/ prefix.
+      if (path === '/upload/file' && request.method === 'POST') {
+        const contentType = request.headers.get('content-type') || 'application/octet-stream';
+        const allowedTypes = ['application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'];
+        if (!allowedTypes.includes(contentType)) {
+          return jsonResponse({ error: 'Only PDF or Word documents are allowed' }, 400, ALLOWED_ORIGIN);
+        }
+        const bytes = await request.arrayBuffer();
+        if (bytes.byteLength > 10 * 1024 * 1024) {
+          return jsonResponse({ error: 'File must be under 10MB' }, 400, ALLOWED_ORIGIN);
+        }
+        const extMap = { 'application/pdf': 'pdf', 'application/msword': 'doc', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx' };
+        const key = `documents/${crypto.randomUUID()}.${extMap[contentType]}`;
+        await env.FDC_UPLOADS.put(key, bytes, { httpMetadata: { contentType } });
+        const url = `${env.R2_PUBLIC_URL}/${key}`;
+        return jsonResponse({ url }, 200, ALLOWED_ORIGIN);
       }
 
       return jsonResponse({ error: 'Unknown endpoint' }, 404, ALLOWED_ORIGIN);
