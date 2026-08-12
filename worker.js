@@ -491,7 +491,7 @@ Brew method: ${method}. Problem: ${issue}`;
         // email above, so updating it to a new address (e.g. a dedicated
         // jobs@ inbox instead of a personal one) is a legitimate edit.
         record.data = { ...record.data, ...data };
-        record.editedAt = Date.now(); record.editedAt = Date.now();
+        record.editedAt = Date.now(); 
         const remainingTtl = record.expiresAt ? Math.max(60, Math.floor((record.expiresAt - Date.now()) / 1000)) : 60 * 60 * 24 * 14;
         await env.FDC_STORE.put(`listing:${id}`, JSON.stringify(record), { expirationTtl: remainingTtl });
         return jsonResponse({ saved: true }, 200, ALLOWED_ORIGIN);
