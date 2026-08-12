@@ -928,8 +928,17 @@ async function pickSocialImage(record, env) {
 // Page and Instagram Business account. Fire-and-forget — failures here
 // never block the listing itself from going live. Needs three secrets set
 // in Cloudflare: FB_PAGE_ID, FB_PAGE_ACCESS_TOKEN, IG_USER_ID.
+//
+// IMPORTANT: every step now logs its outcome (visible in Cloudflare's
+// Observability → Events), since previously every failure here was
+// completely silent — no error anywhere, listing just never posted, with
+// no way to tell whether a secret was missing, the token had expired, or
+// something else entirely rejected the request.
 async function postToSocial(record, env) {
-  if (!env.FB_PAGE_ACCESS_TOKEN || !env.FB_PAGE_ID) return; // not configured yet
+  if (!env.FB_PAGE_ACCESS_TOKEN || !env.FB_PAGE_ID) {
+    console.error('postToSocial: not configured — missing FB_PAGE_ACCESS_TOKEN or FB_PAGE_ID');
+    return;
+  }
   const d = record.data;
   const isJob = record.kind === 'job';
   const url = isJob ? `${env.SITE_URL}/job-board.html?id=${record.id}` : `${env.SITE_URL}/shift-cover.html?id=${record.id}`;
@@ -938,6 +947,7 @@ async function postToSocial(record, env) {
     : `Shift cover needed: ${d.role} at ${d.venue}\n${d.location} · ${d.date} ${d.hours} · ${d.rate}\n\nDetails: ${url}\n\n#DublinJobs #HospitalityJobs #DublinCoffeeJobs`;
 
   const imageUrl = await pickSocialImage(record, env);
+  console.log('postToSocial: starting for listing', record.id, 'imageUrl:', imageUrl);
 
   try {
     // Facebook Page post — post the picked/uploaded photo directly with the
@@ -948,15 +958,28 @@ async function postToSocial(record, env) {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({ url: imageUrl, caption, access_token: env.FB_PAGE_ACCESS_TOKEN }).toString(),
     });
-    if (!photoRes.ok) throw new Error('FB photo post failed');
+    if (!photoRes.ok) {
+      const errBody = await photoRes.text();
+      throw new Error('FB photo post failed: ' + photoRes.status + ' ' + errBody);
+    }
+    console.log('postToSocial: Facebook photo post OK for', record.id);
   } catch (e) {
+    console.error('postToSocial: Facebook photo post failed, trying text fallback:', String(e));
     try {
-      await fetch(`https://graph.facebook.com/v19.0/${env.FB_PAGE_ID}/feed`, {
+      const feedRes = await fetch(`https://graph.facebook.com/v19.0/${env.FB_PAGE_ID}/feed`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({ message: caption, link: url, access_token: env.FB_PAGE_ACCESS_TOKEN }).toString(),
       });
-    } catch (e2) { /* fail quietly, listing already live regardless */ }
+      if (!feedRes.ok) {
+        const errBody = await feedRes.text();
+        console.error('postToSocial: Facebook text fallback ALSO failed:', feedRes.status, errBody);
+      } else {
+        console.log('postToSocial: Facebook text fallback OK for', record.id);
+      }
+    } catch (e2) {
+      console.error('postToSocial: Facebook text fallback threw an exception:', String(e2));
+    }
   }
 
   try {
@@ -969,14 +992,26 @@ async function postToSocial(record, env) {
       });
       const created = await createRes.json();
       if (created.id) {
-        await fetch(`https://graph.facebook.com/v19.0/${env.IG_USER_ID}/media_publish`, {
+        const publishRes = await fetch(`https://graph.facebook.com/v19.0/${env.IG_USER_ID}/media_publish`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: new URLSearchParams({ creation_id: created.id, access_token: env.FB_PAGE_ACCESS_TOKEN }).toString(),
         });
+        const publishResult = await publishRes.json();
+        if (publishRes.ok) {
+          console.log('postToSocial: Instagram post OK for', record.id, JSON.stringify(publishResult));
+        } else {
+          console.error('postToSocial: Instagram publish step failed:', publishRes.status, JSON.stringify(publishResult));
+        }
+      } else {
+        console.error('postToSocial: Instagram media creation failed — no id returned:', JSON.stringify(created));
       }
+    } else {
+      console.error('postToSocial: IG_USER_ID not set — skipping Instagram');
     }
-  } catch (e) { /* fail quietly, listing already live regardless */ }
+  } catch (e) {
+    console.error('postToSocial: Instagram step threw an exception:', String(e));
+  }
 }
 
 // Sends an email to any address via Resend — used for saved-search alert
