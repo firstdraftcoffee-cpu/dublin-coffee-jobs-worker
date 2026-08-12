@@ -491,10 +491,29 @@ Brew method: ${method}. Problem: ${issue}`;
         // email above, so updating it to a new address (e.g. a dedicated
         // jobs@ inbox instead of a personal one) is a legitimate edit.
         record.data = { ...record.data, ...data };
-        record.editedAt = Date.now(); 
+        record.editedAt = Date.now();
         const remainingTtl = record.expiresAt ? Math.max(60, Math.floor((record.expiresAt - Date.now()) / 1000)) : 60 * 60 * 24 * 14;
         await env.FDC_STORE.put(`listing:${id}`, JSON.stringify(record), { expirationTtl: remainingTtl });
         return jsonResponse({ saved: true }, 200, ALLOWED_ORIGIN);
+      }
+
+      // ── NEW: ADMIN — LIST EVERY LIVE LISTING. Powers a private "All
+      // Listings" reference page so Ger can see every listing's ID at a
+      // glance any time, rather than hunting through Stripe or emails
+      // after something's already gone wrong (e.g. an accidental delete).
+      // Only shows what's currently in the database — can't bring back
+      // anything already deleted, since Cloudflare KV has no undo.
+      if (path === '/admin/listings' && request.method === 'GET') {
+        const token = url.searchParams.get('token');
+        if (token !== env.ADMIN_TOKEN) return jsonResponse({ error: 'Forbidden' }, 403, ALLOWED_ORIGIN);
+        const list = await env.FDC_STORE.list({ prefix: 'listing:' });
+        const items = [];
+        for (const key of list.keys) {
+          const raw = await env.FDC_STORE.get(key.name);
+          if (raw) items.push(JSON.parse(raw));
+        }
+        items.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+        return jsonResponse({ items }, 200, ALLOWED_ORIGIN);
       }
 
       // ── NEW: APPLY — sends the application by email server-side, so a
