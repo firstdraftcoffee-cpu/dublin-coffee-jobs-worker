@@ -480,7 +480,7 @@ Brew method: ${method}. Problem: ${issue}`;
         return jsonResponse({ record: JSON.parse(raw) }, 200, ALLOWED_ORIGIN);
       }
       if (path === '/admin/listing' && request.method === 'POST') {
-        const { id, token, data } = await request.json();
+        const { id, token, data, pinned } = await request.json();
         if (token !== env.ADMIN_TOKEN) return jsonResponse({ error: 'Forbidden' }, 403, ALLOWED_ORIGIN);
         if (!id || !data) return jsonResponse({ error: 'Missing id or data' }, 400, ALLOWED_ORIGIN);
         const raw = await env.FDC_STORE.get(`listing:${id}`);
@@ -492,6 +492,11 @@ Brew method: ${method}. Problem: ${issue}`;
         // jobs@ inbox instead of a personal one) is a legitimate edit.
         record.data = { ...record.data, ...data };
         record.editedAt = Date.now();
+        // "pinned" is a top-level admin override, not part of the
+        // employer's own data — forces a listing to the very top of the
+        // board regardless of tier or age, e.g. to fix a genuine new post
+        // getting buried under old test/sample listings.
+        if (typeof pinned === 'boolean') record.pinned = pinned;
         const remainingTtl = record.expiresAt ? Math.max(60, Math.floor((record.expiresAt - Date.now()) / 1000)) : 60 * 60 * 24 * 14;
         await env.FDC_STORE.put(`listing:${id}`, JSON.stringify(record), { expirationTtl: remainingTtl });
         return jsonResponse({ saved: true }, 200, ALLOWED_ORIGIN);
