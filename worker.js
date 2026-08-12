@@ -452,21 +452,21 @@ Brew method: ${method}. Problem: ${issue}`;
       if (path === '/admin/delete' && request.method === 'GET') {
         const id = url.searchParams.get('id');
         const token = url.searchParams.get('token');
-        if (token !== env.ADMIN_TOKEN) return new Response('Forbidden', { status: 403 });
+        if (token !== env.ADMIN_TOKEN) return new Response('Forbidden', { status: 403, headers: { 'Access-Control-Allow-Origin': ALLOWED_ORIGIN } });
         await env.FDC_STORE.delete(`listing:${id}`);
-        return new Response('Listing deleted permanently. You can close this tab.', { status: 200 });
+        return new Response('Listing deleted permanently. You can close this tab.', { status: 200, headers: { 'Access-Control-Allow-Origin': ALLOWED_ORIGIN } });
       }
       if (path === '/admin/restore' && request.method === 'GET') {
         const id = url.searchParams.get('id');
         const token = url.searchParams.get('token');
-        if (token !== env.ADMIN_TOKEN) return new Response('Forbidden', { status: 403 });
+        if (token !== env.ADMIN_TOKEN) return new Response('Forbidden', { status: 403, headers: { 'Access-Control-Allow-Origin': ALLOWED_ORIGIN } });
         const raw = await env.FDC_STORE.get(`listing:${id}`);
         if (raw) {
           const record = JSON.parse(raw);
           record.flagged = false;
           await env.FDC_STORE.put(`listing:${id}`, JSON.stringify(record));
         }
-        return new Response('Listing restored to the board. You can close this tab.', { status: 200 });
+        return new Response('Listing restored to the board. You can close this tab.', { status: 200, headers: { 'Access-Control-Allow-Origin': ALLOWED_ORIGIN } });
       }
 
       // ── NEW: ADMIN — EDIT ANY LISTING. Same idea as the customer-facing
