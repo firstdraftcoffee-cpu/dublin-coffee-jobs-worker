@@ -483,7 +483,7 @@ Brew method: ${method}. Problem: ${issue}`;
         return jsonResponse({ record: JSON.parse(raw) }, 200, ALLOWED_ORIGIN);
       }
       if (path === '/admin/listing' && request.method === 'POST') {
-        const { id, token, data, pinned } = await request.json();
+        const { id, token, data, pinned, extendDays } = await request.json();
         if (token !== env.ADMIN_TOKEN) return jsonResponse({ error: 'Forbidden' }, 403, ALLOWED_ORIGIN);
         if (!id || !data) return jsonResponse({ error: 'Missing id or data' }, 400, ALLOWED_ORIGIN);
         const raw = await env.FDC_STORE.get(`listing:${id}`);
@@ -500,9 +500,17 @@ Brew method: ${method}. Problem: ${issue}`;
         // board regardless of tier or age, e.g. to fix a genuine new post
         // getting buried under old test/sample listings.
         if (typeof pinned === 'boolean') record.pinned = pinned;
+        // "extendDays" changes how much longer the listing stays live —
+        // always adds time from whichever is later (its current expiry,
+        // or right now), so it genuinely extends rather than accidentally
+        // shortening a listing that's already expired.
+        if (typeof extendDays === 'number' && extendDays > 0) {
+          const base = Math.max(record.expiresAt || 0, Date.now());
+          record.expiresAt = base + extendDays * 24 * 60 * 60 * 1000;
+        }
         const remainingTtl = record.expiresAt ? Math.max(60, Math.floor((record.expiresAt - Date.now()) / 1000)) : 60 * 60 * 24 * 14;
         await env.FDC_STORE.put(`listing:${id}`, JSON.stringify(record), { expirationTtl: remainingTtl });
-        return jsonResponse({ saved: true }, 200, ALLOWED_ORIGIN);
+        return jsonResponse({ saved: true, expiresAt: record.expiresAt }, 200, ALLOWED_ORIGIN);
       }
 
       // ── NEW: ADMIN — LIST EVERY LIVE LISTING. Powers a private "All
