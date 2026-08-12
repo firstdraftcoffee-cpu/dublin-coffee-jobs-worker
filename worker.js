@@ -251,6 +251,7 @@ Brew method: ${method}. Problem: ${issue}`;
           const ttl = 14 * 24 * 60 * 60; // 14 days
           record.expiresAt = Date.now() + ttl * 1000;
           await env.FDC_STORE.put(`listing:${id}`, JSON.stringify(record), { expirationTtl: ttl });
+          ctx.waitUntil(sendListingConfirmation(record, env));
           return jsonResponse({ published: true, id }, 200, ALLOWED_ORIGIN);
         }
 
@@ -265,6 +266,7 @@ Brew method: ${method}. Problem: ${issue}`;
             await env.FDC_STORE.put(`listing:${id}`, JSON.stringify(record), { expirationTtl: ttl });
             ctx.waitUntil(postToSocial(record, env));
             ctx.waitUntil(notifyGroupPost(record, env));
+            ctx.waitUntil(sendListingConfirmation(record, env));
             return jsonResponse({ published: true, id }, 200, ALLOWED_ORIGIN);
           }
         }
@@ -340,6 +342,7 @@ Brew method: ${method}. Problem: ${issue}`;
               if (record.kind === 'job' || record.kind === 'shift_need') {
                 ctx.waitUntil(postToSocial(record, env));
                 ctx.waitUntil(notifyGroupPost(record, env));
+                ctx.waitUntil(sendListingConfirmation(record, env));
               }
               // Optional: fire your existing Zapier webhook here to crosspost to Facebook
               // await fetch(env.ZAPIER_WEBHOOK_URL, { method: 'POST', body: JSON.stringify(record) });
@@ -903,6 +906,30 @@ async function notifyGroupPost(record, env) {
     ? `New job: ${d.title} at ${d.venue}\n${d.location} · ${d.salary} · ${d.type}\n\nApply: ${url}`
     : `Shift cover needed: ${d.role} at ${d.venue}\n${d.location} · ${d.date} ${d.hours} · ${d.rate}\n\nDetails: ${url}`;
   await sendEmailTo(env, env.ALERT_EMAIL_TO, `Paste into the DCJ Group: ${d.title || d.role}`, `A new listing just went live and posted to Instagram + the Facebook Page automatically.\n\nThe Facebook Group still needs a manual paste (Meta doesn't allow apps to auto-post into Groups) — here's the text, ready to copy:\n\n---\n${caption}\n---`);
+}
+
+// Confirms to the actual poster that their listing is live — this was
+// previously missing entirely; only Ger's own inbox (via notifyGroupPost
+// above) and the employer subscription confirmation existed, nothing
+// confirmed a job/shift post itself going live to the person who posted
+// it. Includes the listing ID directly, since that's also what's needed
+// to use "Edit a listing" later — one less thing to hunt for if a change
+// is ever needed.
+async function sendListingConfirmation(record, env) {
+  const d = record.data;
+  if (!d.email) return;
+  const isJob = record.kind === 'job';
+  const isAvailable = record.kind === 'shift_available';
+  const url = isJob
+    ? `${env.SITE_URL}/job-board.html?id=${record.id}`
+    : `${env.SITE_URL}/shift-cover.html?id=${record.id}`;
+  const title = isJob ? d.title : (isAvailable ? `${d.role} — available for shifts` : `${d.role} — shift cover needed`);
+  const subject = `Your listing is live: ${title}`;
+  const editNote = isAvailable
+    ? `Want to update or remove this later? Go to ${env.SITE_URL}/shift-cover.html, click "Edit a listing", and enter:\n\nListing ID: ${record.id}\nEmail: ${d.email}`
+    : `Want to make a change later? Go to ${isJob ? env.SITE_URL + '/job-board.html' : env.SITE_URL + '/shift-cover.html'}, click "Edit a listing", and enter:\n\nListing ID: ${record.id}\nEmail: ${d.email}`;
+  const text = `Your listing is now live on Dublin Coffee Jobs.\n\n${title}${d.venue ? ' at ' + d.venue : ''}\n${d.location || d.area || ''}\n\nView it: ${url}\n\n${editNote}\n\nQuestions — just reply to this email.`;
+  await sendEmailTo(env, d.email, subject, text);
 }
 
 // Picks the image used for a social post. If the listing supplied its own
