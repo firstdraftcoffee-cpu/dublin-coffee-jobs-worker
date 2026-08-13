@@ -2,48 +2,19 @@
 // First Draft Coffee — Unified Cloudflare Worker (v2)
 // Handles: CV Review, Brew Compass, Job Listings, Shift Cover,
 //          Stripe Checkout + Webhook, Flag/Report alerts
-//
-// NEW BINDINGS NEEDED (Cloudflare dashboard → Worker → Settings):
-//   KV Namespace   : FDC_STORE           (create + bind this name)
-//   Secret         : ANTHROPIC_API_KEY   (already set)
-//   Secret         : STRIPE_SECRET_KEY   (from Stripe dashboard)
-//   Secret         : STRIPE_WEBHOOK_SECRET (from Stripe webhook setup)
-//   Secret         : RESEND_API_KEY      (from Resend dashboard)
-//   Secret         : ADMIN_TOKEN         (any long random string you pick —
-//                                         used to authorise hide/remove actions
-//                                         from the alert email links)
-//   Variable       : ALERT_EMAIL_TO      (your inbox, e.g. ger@firstdraftcoffee.net)
-//   Variable       : SITE_URL            (e.g. https://dublincoffeejobs.com)
-//
-// STRIPE SETUP:
-//   1. Create two Prices in Stripe dashboard (or create Products+Prices via API):
-//      - "Standard Listing"  one-off  €50
-//      - "Featured Listing"  one-off  €100
-//      (Shift-cover "need cover" post can reuse a smaller €10/€25 price —
-//       see PRICE_IDS map below, fill in your real Stripe Price IDs)
-//   2. Add a webhook endpoint in Stripe pointing to:
-//      https://cv-review.firstdraftcoffee.workers.dev/webhook/stripe
-//      Listen for: checkout.session.completed
-//   3. Copy the webhook signing secret into STRIPE_WEBHOOK_SECRET
-//
-// Deploy: paste into Cloudflare Workers editor, or `wrangler deploy`
 // ═══════════════════════════════════════════════════════════════
 
 const PRICE_IDS = {
-  job_standard:       'price_1TusgiJExrSWtqFLz37CJZd2', // Standard Job Listing — €35 / 14 days
-  job_featured:       'price_1Tush8JExrSWtqFLF1xMwK7J', // Featured Job Listing — €50 / 30 days
-  job_retainer:       'price_1TvNkVJExrSWtqFL22x9WWtN', // Monthly unlimited-posts subscription — €200/mo
-  shift_need:         'price_1TvbIvJExrSWtqFLmhrDFPKU', // Standard Listing — €35 venue shift post / 7 days
-  shift_need_urgent:  'price_1Tusg8JExrSWtqFLBMrLWFbD', // Urgent Staff Listing — €50 featured/urgent shift post
-  cv_full:            'price_1TvbGRJExrSWtqFLSdBRAtZI', // CV Review — Full Review with rewritten summary — €10
+  job_standard:       'price_1TusgiJExrSWtqFLz37CJZd2',
+  job_featured:       'price_1Tush8JExrSWtqFLF1xMwK7J',
+  job_retainer:       'price_1TvNkVJExrSWtqFL22x9WWtN',
+  shift_need:         'price_1TvbIvJExrSWtqFLmhrDFPKU',
+  shift_need_urgent:  'price_1Tusg8JExrSWtqFLBMrLWFbD',
+  cv_full:            'price_1TvbGRJExrSWtqFLSdBRAtZI',
 };
 
 const LISTING_DAYS = { job_standard: 14, job_featured: 30, shift_need: 7, shift_need_urgent: 7 };
 
-// Real, current Irish hospitality/coffee hiring knowledge — supplied by Ger,
-// grounds the CV reviewer in actual market reality instead of generic advice.
-// Update this whenever the market shifts; it's used by both the free and
-// paid CV review prompts below.
 const IRISH_HOSPITALITY_KNOWLEDGE = `
 IRISH HOSPITALITY & COFFEE JOB MARKET KNOWLEDGE (2026) — ground your review in this, not generic advice:
 
@@ -107,7 +78,6 @@ export default {
     }
 
     try {
-      // ── EXISTING: CV REVIEW ─────────────────────────────────
       if ((path === '/cv' || path === '/' || path === '') && request.method === 'POST') {
         const { cv, role } = await request.json();
         if (!cv || cv.length < 100) return jsonResponse({ error: 'CV too short' }, 400, ALLOWED_ORIGIN);
@@ -133,9 +103,6 @@ Respond ONLY with a JSON object (no markdown, no backticks, no overall score —
         const text = data.content.map(i => i.text || '').join('');
         const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
 
-        // Compute the overall score ourselves from the breakdown, rather than
-        // trusting the model's arithmetic — keeps scoring genuinely consistent
-        // candidate to candidate.
         const b = parsed.scoreBreakdown || {};
         const score = Math.round((b.reliability||0) + (b.experience||0) + (b.achievements||0) + (b.progression||0) + (b.technicalSkills||0) + (b.presentation||0) + (b.certifications||0) + (b.roleFit||0));
         const scoreLabel = score >= 85 ? 'Outstanding candidate' : score >= 70 ? 'Strong candidate' : score >= 50 ? 'Solid, needs work' : 'Needs significant work';
@@ -145,7 +112,6 @@ Respond ONLY with a JSON object (no markdown, no backticks, no overall score —
         return jsonResponse(parsed, 200, ALLOWED_ORIGIN);
       }
 
-      // ── NEW: CV FULL REVIEW — paid, starts Stripe Checkout ───
       if (path === '/cv/full/start' && request.method === 'POST') {
         const { cv, role, email } = await request.json();
         if (!cv || cv.length < 100) return jsonResponse({ error: 'CV too short' }, 400, ALLOWED_ORIGIN);
@@ -176,7 +142,6 @@ Respond ONLY with a JSON object (no markdown, no backticks, no overall score —
         return jsonResponse({ checkoutUrl: session.url }, 200, ALLOWED_ORIGIN);
       }
 
-      // ── NEW: CV FULL REVIEW — fetch result once paid ─────────
       if (path === '/cv/full/result' && request.method === 'GET') {
         const id = url.searchParams.get('id');
         if (!id) return jsonResponse({ error: 'Missing id' }, 400, ALLOWED_ORIGIN);
@@ -187,11 +152,6 @@ Respond ONLY with a JSON object (no markdown, no backticks, no overall score —
         if (record.status === 'pending') return jsonResponse({ status: 'pending' }, 200, ALLOWED_ORIGIN);
 
         if (record.status === 'paid') {
-          // Normally the webhook already kicked off generation in the
-          // background the moment payment succeeded (see /webhook/stripe),
-          // so this is mainly a fallback in case that hasn't finished yet —
-          // running it here too means the review still completes even if
-          // the background job was slow or didn't fire.
           try {
             const result = await generateFullReviewResult(record, env);
             record.status = 'done';
@@ -206,7 +166,7 @@ Respond ONLY with a JSON object (no markdown, no backticks, no overall score —
             if (record.attempts >= 3) {
               return jsonResponse({ status: 'error', error: 'We hit a problem generating your review. Please contact us and we\'ll sort it out — your payment is confirmed either way.' }, 200, ALLOWED_ORIGIN);
             }
-            return jsonResponse({ status: 'paid' }, 200, ALLOWED_ORIGIN); // still working on it, frontend will poll again
+            return jsonResponse({ status: 'paid' }, 200, ALLOWED_ORIGIN);
           }
         }
 
@@ -228,10 +188,9 @@ Brew method: ${method}. Problem: ${issue}`;
         return jsonResponse({ result }, 200, ALLOWED_ORIGIN);
       }
 
-      // ── NEW: CREATE A LISTING (job or shift-need) — starts Stripe Checkout ──
       if (path === '/listings/create' && request.method === 'POST') {
         const body = await request.json();
-        const { kind, tier, data } = body; // kind: 'job' | 'shift_need' | 'shift_available'
+        const { kind, tier, data } = body;
         if (!data || !kind) return jsonResponse({ error: 'Missing kind or data' }, 400, ALLOWED_ORIGIN);
         if (kind === 'job' && (!data.salary || !String(data.salary).trim())) {
           return jsonResponse({ error: 'A salary range is required for job listings' }, 400, ALLOWED_ORIGIN);
@@ -245,23 +204,21 @@ Brew method: ${method}. Problem: ${issue}`;
           flagged: false,
         };
 
-        // Free path: barista "available" posts skip Stripe entirely
         if (kind === 'shift_available') {
           record.status = 'published';
-          const ttl = 14 * 24 * 60 * 60; // 14 days
+          const ttl = 14 * 24 * 60 * 60;
           record.expiresAt = Date.now() + ttl * 1000;
           await env.FDC_STORE.put(`listing:${id}`, JSON.stringify(record), { expirationTtl: ttl });
           ctx.waitUntil(sendListingConfirmation(record, env));
           return jsonResponse({ published: true, id }, 200, ALLOWED_ORIGIN);
         }
 
-        // Free path: active subscriber posting a job — skip Stripe entirely
         if (kind === 'job' && data.email) {
           const subscribed = await hasActiveSubscription(data.email, env);
           if (subscribed) {
             record.status = 'published';
             record.tier = 'subscriber';
-            const ttl = 30 * 24 * 60 * 60; // 30 days, repost any time while subscribed
+            const ttl = 30 * 24 * 60 * 60;
             record.expiresAt = Date.now() + ttl * 1000;
             await env.FDC_STORE.put(`listing:${id}`, JSON.stringify(record), { expirationTtl: ttl });
             ctx.waitUntil(postToSocial(record, env));
@@ -271,12 +228,10 @@ Brew method: ${method}. Problem: ${issue}`;
           }
         }
 
-        // Paid path: job listings + venue shift-need posts
         const priceKey = kind === 'job' ? `job_${tier}` : `shift_${tier}`;
         const priceId = PRICE_IDS[priceKey];
         if (!priceId) return jsonResponse({ error: 'Unknown tier' }, 400, ALLOWED_ORIGIN);
 
-        // Store the pending record for 24h — cleaned up if payment never completes
         await env.FDC_STORE.put(`pending:${id}`, JSON.stringify(record), { expirationTtl: 60 * 60 * 24 });
 
         const session = await createStripeCheckoutSession({
@@ -290,7 +245,6 @@ Brew method: ${method}. Problem: ${issue}`;
         return jsonResponse({ checkoutUrl: session.url, id }, 200, ALLOWED_ORIGIN);
       }
 
-      // ── NEW: SUBSCRIBE — unlimited job posts for a flat monthly price ──
       if (path === '/subscribe/create' && request.method === 'POST') {
         const { email } = await request.json();
         if (!email) return jsonResponse({ error: 'Email is required' }, 400, ALLOWED_ORIGIN);
@@ -316,7 +270,6 @@ Brew method: ${method}. Problem: ${issue}`;
         return jsonResponse({ checkoutUrl: session.url }, 200, ALLOWED_ORIGIN);
       }
 
-      // ── NEW: STRIPE WEBHOOK — auto-publish on successful payment ──
       if (path === '/webhook/stripe' && request.method === 'POST') {
         const sig = request.headers.get('stripe-signature');
         const rawBody = await request.text();
@@ -344,8 +297,6 @@ Brew method: ${method}. Problem: ${issue}`;
                 ctx.waitUntil(notifyGroupPost(record, env));
                 ctx.waitUntil(sendListingConfirmation(record, env));
               }
-              // Optional: fire your existing Zapier webhook here to crosspost to Facebook
-              // await fetch(env.ZAPIER_WEBHOOK_URL, { method: 'POST', body: JSON.stringify(record) });
             }
           } else if (reviewId) {
             const raw = await env.FDC_STORE.get(`cvreview:${reviewId}`);
@@ -353,10 +304,6 @@ Brew method: ${method}. Problem: ${issue}`;
               const record = JSON.parse(raw);
               record.status = 'paid';
               await env.FDC_STORE.put(`cvreview:${reviewId}`, JSON.stringify(record), { expirationTtl: 60 * 60 * 24 });
-              // Start generating the full review right now, in the background,
-              // rather than waiting for the page to poll for it — by the time
-              // the customer's browser redirects back and starts polling, the
-              // review is often already done or very close to it.
               ctx.waitUntil((async () => {
                 try {
                   const result = await generateFullReviewResult(record, env);
@@ -367,7 +314,6 @@ Brew method: ${method}. Problem: ${issue}`;
                   console.error('Background full review generation failed:', String(e));
                   record.lastError = String(e);
                   await env.FDC_STORE.put(`cvreview:${reviewId}`, JSON.stringify(record), { expirationTtl: 60 * 60 * 24 });
-                  /* leave status as 'paid' — the polling endpoint will retry generation as a fallback */
                 }
               })());
             }
@@ -385,16 +331,15 @@ Brew method: ${method}. Problem: ${issue}`;
         return new Response('ok', { status: 200 });
       }
 
-      // ── NEW: LIST ACTIVE LISTINGS ────────────────────────────
       if (path === '/listings' && request.method === 'GET') {
-        const kind = url.searchParams.get('kind'); // optional filter: job | shift_need | shift_available
+        const kind = url.searchParams.get('kind');
         const list = await env.FDC_STORE.list({ prefix: 'listing:' });
         const items = [];
         for (const key of list.keys) {
           const raw = await env.FDC_STORE.get(key.name);
           if (!raw) continue;
           const record = JSON.parse(raw);
-          if (record.flagged) continue; // hidden pending your review
+          if (record.flagged) continue;
           if (kind && record.kind !== kind) continue;
           const viewsRaw = await env.FDC_STORE.get(`views:${record.id}`);
           record.views = viewsRaw ? parseInt(viewsRaw, 10) : 0;
@@ -404,7 +349,6 @@ Brew method: ${method}. Problem: ${issue}`;
         return jsonResponse({ items }, 200, ALLOWED_ORIGIN);
       }
 
-      // ── NEW: VIEW COUNTER — one increment per card render ────
       if (path === '/listings/view' && request.method === 'POST') {
         const { id } = await request.json();
         if (!id) return jsonResponse({ error: 'Missing id' }, 400, ALLOWED_ORIGIN);
@@ -414,7 +358,6 @@ Brew method: ${method}. Problem: ${issue}`;
         return jsonResponse({ views: next }, 200, ALLOWED_ORIGIN);
       }
 
-      // ── NEW: SAVED-SEARCH ALERTS — email when a matching listing appears ──
       if (path === '/alerts/create' && request.method === 'POST') {
         const { email, kind, role, area, minRate } = await request.json();
         if (!email || !kind) return jsonResponse({ error: 'Email and kind are required' }, 400, ALLOWED_ORIGIN);
@@ -424,7 +367,6 @@ Brew method: ${method}. Problem: ${issue}`;
         return jsonResponse({ created: true }, 200, ALLOWED_ORIGIN);
       }
 
-      // ── NEW: FLAG / REPORT A LISTING — alerts you by email ───
       if (path === '/flag' && request.method === 'POST') {
         const { listingId, reason } = await request.json();
         if (!listingId) return jsonResponse({ error: 'Missing listingId' }, 400, ALLOWED_ORIGIN);
@@ -432,11 +374,10 @@ Brew method: ${method}. Problem: ${issue}`;
         const raw = await env.FDC_STORE.get(`listing:${listingId}`);
         if (!raw) return jsonResponse({ error: 'Listing not found' }, 404, ALLOWED_ORIGIN);
         const record = JSON.parse(raw);
-        record.flagged = true; // hides it from the board immediately
+        record.flagged = true;
         record.flagReason = reason || 'No reason given';
         await env.FDC_STORE.put(`listing:${listingId}`, JSON.stringify(record));
 
-        const hideUrl = `${env.SITE_URL}`; // hidden already; link below is for permanent delete
         const deleteUrl = `${new URL(request.url).origin}/admin/delete?id=${listingId}&token=${env.ADMIN_TOKEN}`;
         const restoreUrl = `${new URL(request.url).origin}/admin/restore?id=${listingId}&token=${env.ADMIN_TOKEN}`;
 
@@ -448,7 +389,6 @@ Brew method: ${method}. Problem: ${issue}`;
         return jsonResponse({ flagged: true }, 200, ALLOWED_ORIGIN);
       }
 
-      // ── NEW: ADMIN ACTIONS (one-click from the alert email) ──
       if (path === '/admin/delete' && request.method === 'GET') {
         const id = url.searchParams.get('id');
         const token = url.searchParams.get('token');
@@ -469,10 +409,6 @@ Brew method: ${method}. Problem: ${issue}`;
         return new Response('Listing restored to the board. You can close this tab.', { status: 200, headers: { 'Access-Control-Allow-Origin': ALLOWED_ORIGIN } });
       }
 
-      // ── NEW: ADMIN — EDIT ANY LISTING. Same idea as the customer-facing
-      // /listings/edit, but authorised by the ADMIN_TOKEN secret instead of
-      // an email match, so Ger can update any listing on the employer's
-      // behalf without needing their email.
       if (path === '/admin/listing' && request.method === 'GET') {
         const id = url.searchParams.get('id');
         const token = url.searchParams.get('token');
@@ -489,21 +425,9 @@ Brew method: ${method}. Problem: ${issue}`;
         const raw = await env.FDC_STORE.get(`listing:${id}`);
         if (!raw) return jsonResponse({ error: 'Listing not found or expired' }, 404, ALLOWED_ORIGIN);
         const record = JSON.parse(raw);
-        // Note: email is intentionally allowed to change here — the
-        // employer already proved ownership by matching the *current*
-        // email above, so updating it to a new address (e.g. a dedicated
-        // jobs@ inbox instead of a personal one) is a legitimate edit.
         record.data = { ...record.data, ...data };
         record.editedAt = Date.now();
-        // "pinned" is a top-level admin override, not part of the
-        // employer's own data — forces a listing to the very top of the
-        // board regardless of tier or age, e.g. to fix a genuine new post
-        // getting buried under old test/sample listings.
         if (typeof pinned === 'boolean') record.pinned = pinned;
-        // "extendDays" changes how much longer the listing stays live —
-        // always adds time from whichever is later (its current expiry,
-        // or right now), so it genuinely extends rather than accidentally
-        // shortening a listing that's already expired.
         if (typeof extendDays === 'number' && extendDays > 0) {
           const base = Math.max(record.expiresAt || 0, Date.now());
           record.expiresAt = base + extendDays * 24 * 60 * 60 * 1000;
@@ -513,12 +437,6 @@ Brew method: ${method}. Problem: ${issue}`;
         return jsonResponse({ saved: true, expiresAt: record.expiresAt }, 200, ALLOWED_ORIGIN);
       }
 
-      // ── NEW: ADMIN — LIST EVERY LIVE LISTING. Powers a private "All
-      // Listings" reference page so Ger can see every listing's ID at a
-      // glance any time, rather than hunting through Stripe or emails
-      // after something's already gone wrong (e.g. an accidental delete).
-      // Only shows what's currently in the database — can't bring back
-      // anything already deleted, since Cloudflare KV has no undo.
       if (path === '/admin/listings' && request.method === 'GET') {
         const token = url.searchParams.get('token');
         if (token !== env.ADMIN_TOKEN) return jsonResponse({ error: 'Forbidden' }, 403, ALLOWED_ORIGIN);
@@ -543,14 +461,6 @@ Brew method: ${method}. Problem: ${issue}`;
           return jsonResponse({ error: 'Missing required fields' }, 400, ALLOWED_ORIGIN);
         }
 
-        // ── DUPLICATE GUARD — one email per applicant per job, no matter
-        // how many times this endpoint gets hit. This is what actually
-        // stops the multi-email problem: a slow/impatient double-click,
-        // a flaky connection retry, or anything else that fires this
-        // request more than once for the same person applying to the
-        // same listing. Checked BEFORE scoring or sending anything, so a
-        // second request is a genuine no-op — no duplicate email, no
-        // duplicate record, no wasted AI call.
         if (listingId) {
           const existing = await env.FDC_STORE.list({ prefix: `application:${listingId}:` });
           for (const key of existing.keys) {
@@ -599,13 +509,10 @@ Brew method: ${method}. Problem: ${issue}`;
         const cvFileLine = cvFileUrl ? `\nAttached CV file: ${cvFileUrl}\n` : '';
         const text = `New application via Dublin Coffee Jobs\n\nRole: ${jobTitle || ''}\nName: ${name}\nEmail: ${candidateEmail}\nRole/experience: ${role || ''}\n${scoreLine}${about ? '\nNote: ' + about + '\n' : ''}${cvFileLine}\n${cv ? '\n--- CV (pasted text) ---\n' + cv + '\n' : '\n(No CV text pasted)\n'}${listingId ? `\nView the full shortlist for this job: ${env.SITE_URL}/applicants.html?listingId=${listingId}&email=${encodeURIComponent(employerEmail)}\n` : ''}`;
         await sendEmailTo(env, employerEmail, subject, text, candidateEmail);
+        ctx.waitUntil(sendApplicationConfirmation({ candidateEmail, name, jobTitle, score, highlights }, env));
         return jsonResponse({ sent: true, score }, 200, ALLOWED_ORIGIN);
       }
 
-      // ── NEW: APPLICANT SHORTLIST — employer views ranked applicants for
-      // their own listing. No accounts: the employer's email must match the
-      // application email on file for that listing, same lightweight
-      // pattern already used for subscriptions ──
       if (path === '/applicants' && request.method === 'GET') {
         const listingId = url.searchParams.get('listingId');
         const email = url.searchParams.get('email');
@@ -634,10 +541,6 @@ Brew method: ${method}. Problem: ${issue}`;
         return jsonResponse({ jobTitle: listing.data.title, skipScoring: !!listing.data.skipScoring, applicants }, 200, ALLOWED_ORIGIN);
       }
 
-      // ── NEW: IMAGE UPLOAD — accepts a file, stores it in R2, returns a
-      // public URL. Used by the drag-and-drop widget on job-board.html and
-      // shift-cover.html so employers can upload a logo/photo directly
-      // instead of pasting a URL to an image hosted elsewhere.
       if (path === '/upload/image' && request.method === 'POST') {
         const contentType = request.headers.get('content-type') || '';
         if (!contentType.startsWith('image/')) {
@@ -654,10 +557,6 @@ Brew method: ${method}. Problem: ${issue}`;
         return jsonResponse({ url }, 200, ALLOWED_ORIGIN);
       }
 
-      // ── NEW: EDIT LISTING — fetch — employer looks up their own listing
-      // by listing ID + the email they posted it under (same no-accounts
-      // pattern as /applicants and subscriptions) so they can edit it in
-      // the same posting form rather than creating a brand new paid post.
       if (path === '/listings/edit' && request.method === 'GET') {
         const id = url.searchParams.get('id');
         const email = url.searchParams.get('email');
@@ -671,10 +570,6 @@ Brew method: ${method}. Problem: ${issue}`;
         return jsonResponse({ record }, 200, ALLOWED_ORIGIN);
       }
 
-      // ── NEW: EDIT LISTING — save. Same email-match check, then
-      // overwrites the listing's data in place. Preserves the original
-      // expiry (posting time / tier already paid for isn't affected by an
-      // edit) rather than resetting the countdown.
       if (path === '/listings/edit' && request.method === 'POST') {
         const { id, email, data } = await request.json();
         if (!id || !email || !data) return jsonResponse({ error: 'Missing id, email, or data' }, 400, ALLOWED_ORIGIN);
@@ -684,10 +579,6 @@ Brew method: ${method}. Problem: ${issue}`;
         if ((record.data.email || '').toLowerCase() !== email.toLowerCase()) {
           return jsonResponse({ error: 'That email doesn\'t match the one this listing was posted under' }, 403, ALLOWED_ORIGIN);
         }
-        // Note: email is intentionally allowed to change here — the
-        // employer already proved ownership by matching the *current*
-        // email above, so updating it to a new address (e.g. a dedicated
-        // jobs@ inbox instead of a personal one) is a legitimate edit.
         record.data = { ...record.data, ...data };
         record.editedAt = Date.now();
         const remainingTtl = record.expiresAt ? Math.max(60, Math.floor((record.expiresAt - Date.now()) / 1000)) : 60 * 60 * 24 * 14;
@@ -695,9 +586,6 @@ Brew method: ${method}. Problem: ${issue}`;
         return jsonResponse({ saved: true }, 200, ALLOWED_ORIGIN);
       }
 
-      // ── NEW: REMOVE AN APPLICANT — employer removes an unwanted
-      // candidate from their own shortlist. Verified the same way as
-      // /applicants (listing ID + the email it was posted under).
       if (path === '/applicants/remove' && request.method === 'POST') {
         const { listingId, appId, email } = await request.json();
         if (!listingId || !appId || !email) return jsonResponse({ error: 'Missing listingId, appId, or email' }, 400, ALLOWED_ORIGIN);
@@ -711,10 +599,6 @@ Brew method: ${method}. Problem: ${issue}`;
         return jsonResponse({ removed: true }, 200, ALLOWED_ORIGIN);
       }
 
-      // ── NEW: FILE UPLOAD — for CV attachments (PDF/Word), separate from
-      // /upload/image since it needs to accept document types, not just
-      // images, and a slightly larger size limit. Stores in the same R2
-      // bucket under a documents/ prefix.
       if (path === '/upload/file' && request.method === 'POST') {
         const contentType = request.headers.get('content-type') || 'application/octet-stream';
         const allowedTypes = ['application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'];
@@ -739,9 +623,6 @@ Brew method: ${method}. Problem: ${issue}`;
     }
   },
 
-  // Runs on the cron schedule set in wrangler.toml (hourly). Checks every
-  // saved alert against listings created since it last ran, and emails a
-  // digest of matches. Updates lastChecked so nothing gets emailed twice.
   async scheduled(event, env, ctx) {
     const alertList = await env.FDC_STORE.list({ prefix: 'alert:' });
     const listingList = await env.FDC_STORE.list({ prefix: 'listing:' });
@@ -790,11 +671,6 @@ async function callClaude(prompt, env, maxTokens) {
     })
   });
   const data = await res.json();
-  // The Anthropic API returns an error object (no `content` field) on
-  // failures like a bad/retired model name, invalid key, or rate limits.
-  // Without this check, downstream code crashes on `data.content.map(...)`
-  // with a generic "Cannot read properties of undefined" — this makes the
-  // real reason show up in the Worker's error response instead.
   if (!data.content) {
     throw new Error('Claude API error: ' + JSON.stringify(data));
   }
@@ -813,10 +689,6 @@ Respond ONLY with a JSON object (no markdown, no backticks):
   return JSON.parse(text.replace(/```json|```/g, '').trim());
 }
 
-// Scores a single applicant's CV against one specific job (not a generic
-// role template) — used to build the employer's ranked shortlist. Kept
-// deliberately lightweight (short prompt, small max_tokens) since this runs
-// on every application, not just when someone asks for a review.
 async function scoreApplicantForJob({ cv, role, about, jobTitle, jobDesc }, env) {
   const prompt = `You are screening a job application for an Irish hospitality/coffee employer. Score how well this specific candidate fits this specific role — not a generic template.
 Role applied for: ${jobTitle}
@@ -838,8 +710,6 @@ function jsonResponse(data, status, origin) {
   });
 }
 
-// Checks Stripe for a customer with this email who has an active subscription
-// to the job_retainer price. Used to let subscribers post free.
 async function hasActiveSubscription(email, env) {
   try {
     const custRes = await fetch(`https://api.stripe.com/v1/customers?email=${encodeURIComponent(email)}&limit=3`, {
@@ -859,7 +729,6 @@ async function hasActiveSubscription(email, env) {
   } catch (e) { return false; }
 }
 
-// Creates a Stripe Checkout Session via plain REST call (no SDK needed in Workers)
 async function createStripeCheckoutSession({ priceId, listingId, email, successUrl, cancelUrl }, env) {
   const params = new URLSearchParams();
   params.append('mode', 'payment');
@@ -883,7 +752,6 @@ async function createStripeCheckoutSession({ priceId, listingId, email, successU
   return res.json();
 }
 
-// Verifies a Stripe webhook signature using Web Crypto (HMAC-SHA256)
 async function verifyStripeSignature(rawBody, sigHeader, secret) {
   if (!sigHeader) return false;
   const parts = Object.fromEntries(sigHeader.split(',').map(p => p.split('=')));
@@ -901,10 +769,6 @@ async function verifyStripeSignature(rawBody, sigHeader, secret) {
   return expected === signature;
 }
 
-// Emails you the ready-to-paste post text for the Dublin Coffee Jobs
-// Facebook Group, since Meta removed the ability for any app to post into
-// Groups automatically in 2024. Same caption as the auto-posted Instagram/
-// Facebook Page post — just copy, paste into the Group, done.
 async function notifyGroupPost(record, env) {
   if (!env.ALERT_EMAIL_TO) return;
   const d = record.data;
@@ -916,13 +780,6 @@ async function notifyGroupPost(record, env) {
   await sendEmailTo(env, env.ALERT_EMAIL_TO, `Paste into the DCJ Group: ${d.title || d.role}`, `A new listing just went live and posted to Instagram + the Facebook Page automatically.\n\nThe Facebook Group still needs a manual paste (Meta doesn't allow apps to auto-post into Groups) — here's the text, ready to copy:\n\n---\n${caption}\n---`);
 }
 
-// Confirms to the actual poster that their listing is live — this was
-// previously missing entirely; only Ger's own inbox (via notifyGroupPost
-// above) and the employer subscription confirmation existed, nothing
-// confirmed a job/shift post itself going live to the person who posted
-// it. Includes the listing ID directly, since that's also what's needed
-// to use "Edit a listing" later — one less thing to hunt for if a change
-// is ever needed.
 async function sendListingConfirmation(record, env) {
   const d = record.data;
   if (!d.email) return;
@@ -940,12 +797,21 @@ async function sendListingConfirmation(record, env) {
   await sendEmailTo(env, d.email, subject, text);
 }
 
-// Picks the image used for a social post. If the listing supplied its own
-// image (data.imageUrl, e.g. a photo the employer/venue uploaded), that's
-// used as-is. Otherwise this rotates through a fixed set of SOCIAL_IMAGE_COUNT
-// images stored at ${SITE_URL}/1.jpg ... /N.jpg, so posts don't
-// all look identical. The rotation position is kept in FDC_STORE so it
-// advances across requests/deployments rather than resetting each time.
+// Confirms to the candidate that their application was sent, and shows
+// them their own match score + highlights for this specific job — they
+// were never shown this before, only the employer was. Kept low-key and
+// encouraging, consistent with the CV Reviewer's tone rules elsewhere: a
+// score is informational, one factor among many, never a verdict.
+async function sendApplicationConfirmation({ candidateEmail, name, jobTitle, score, highlights }, env) {
+  if (!candidateEmail) return;
+  const subject = `Your application to ${jobTitle || 'the role'} was sent`;
+  const scoreLine = score !== null
+    ? `\nFor reference, here's how your application matched this specific role:\n\nMatch score: ${score}/100\n${(highlights || []).map(h => '- ' + h).join('\n')}\n\nThis is just a quick reference for the employer — one factor among many, not a verdict.\n`
+    : '';
+  const text = `Hi ${name || ''},\n\nYour application to ${jobTitle || 'this role'} has been sent to the employer.\n${scoreLine}\nGood luck!\n\n— Dublin Coffee Jobs`;
+  await sendEmailTo(env, candidateEmail, subject, text);
+}
+
 const SOCIAL_IMAGE_COUNT = 66;
 
 async function pickSocialImage(record, env) {
@@ -954,21 +820,11 @@ async function pickSocialImage(record, env) {
 
   const raw = await env.FDC_STORE.get('social:image-counter');
   const current = raw ? parseInt(raw, 10) : 0;
-  const index = (current % SOCIAL_IMAGE_COUNT) + 1; // 1-based filenames
+  const index = (current % SOCIAL_IMAGE_COUNT) + 1;
   await env.FDC_STORE.put('social:image-counter', String(current + 1));
   return `${env.SITE_URL}/${index}.jpg`;
 }
 
-// Cross-posts a newly published job or shift-need listing to the Facebook
-// Page and Instagram Business account. Fire-and-forget — failures here
-// never block the listing itself from going live. Needs three secrets set
-// in Cloudflare: FB_PAGE_ID, FB_PAGE_ACCESS_TOKEN, IG_USER_ID.
-//
-// IMPORTANT: every step now logs its outcome (visible in Cloudflare's
-// Observability → Events), since previously every failure here was
-// completely silent — no error anywhere, listing just never posted, with
-// no way to tell whether a secret was missing, the token had expired, or
-// something else entirely rejected the request.
 async function postToSocial(record, env) {
   if (!env.FB_PAGE_ACCESS_TOKEN || !env.FB_PAGE_ID) {
     console.error('postToSocial: not configured — missing FB_PAGE_ACCESS_TOKEN or FB_PAGE_ID');
@@ -985,9 +841,6 @@ async function postToSocial(record, env) {
   console.log('postToSocial: starting for listing', record.id, 'imageUrl:', imageUrl);
 
   try {
-    // Facebook Page post — post the picked/uploaded photo directly with the
-    // caption. Falls back to a plain text+link post if the photo post fails
-    // for any reason, so a listing never fails to post over an image issue.
     const photoRes = await fetch(`https://graph.facebook.com/v19.0/${env.FB_PAGE_ID}/photos`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -1018,7 +871,6 @@ async function postToSocial(record, env) {
   }
 
   try {
-    // Instagram requires an image — uses the same picked/uploaded photo as Facebook
     if (env.IG_USER_ID) {
       const createRes = await fetch(`https://graph.facebook.com/v19.0/${env.IG_USER_ID}/media`, {
         method: 'POST',
@@ -1049,17 +901,6 @@ async function postToSocial(record, env) {
   }
 }
 
-// Sends an email to any address via Resend — used for saved-search alert
-// digests and job applications. Pass replyTo so the recipient can reply
-// straight to the candidate rather than to the noreply alerts address.
-// Requires the RESEND_API_KEY secret and firstdraftcoffee.net verified as
-// a sending domain in the Resend dashboard (MailChannels' free Cloudflare
-// Workers service was shut down in August 2024, so this replaces it).
-//
-// IMPORTANT: this now checks the response and logs the outcome either way
-// (visible in Cloudflare's Observability → Events log), since previously a
-// rejected send (bad key, unverified domain, validation error) failed
-// completely silently with no error anywhere.
 async function sendEmailTo(env, to, subject, text, replyTo) {
   const payload = {
     from: 'Dublin Coffee Jobs <alerts@firstdraftcoffee.net>',
@@ -1089,8 +930,6 @@ async function sendEmailTo(env, to, subject, text, replyTo) {
   }
 }
 
-// Sends an alert email to Ger via Resend (flag/report notifications, etc.)
-// Same logging treatment as sendEmailTo above.
 async function sendAlertEmail(env, { subject, text }) {
   try {
     const res = await fetch('https://api.resend.com/emails', {
