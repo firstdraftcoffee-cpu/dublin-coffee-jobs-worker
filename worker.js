@@ -3,6 +3,9 @@
 // Handles: CV Review, Brew Compass, Job Listings, Shift Cover,
 //          Stripe Checkout + Webhook, Flag/Report alerts,
 //          Application digest mode, renewal reminders
+// (redeploy trigger — forces this commit to promote to 100% traffic
+// via the normal GitHub deploy path, rather than a dashboard-only
+// secret edit that can get stuck at 0% traffic)
 // ═══════════════════════════════════════════════════════════════
 
 const PRICE_IDS = {
@@ -1048,18 +1051,40 @@ async function postImageAndCaptionToSocial({ imageUrl, caption, link }, env) {
       });
       const created = await createRes.json();
       if (created.id) {
-        const publishRes = await fetch(`https://graph.facebook.com/v19.0/${env.IG_USER_ID}/media_publish`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: new URLSearchParams({ creation_id: created.id, access_token: env.FB_PAGE_ACCESS_TOKEN }).toString(),
-        });
-        const publishResult = await publishRes.json();
-        if (publishRes.ok) {
-          result.instagram = { ok: true, detail: 'Posted' };
-          console.log('postImageAndCaptionToSocial: Instagram post OK', JSON.stringify(publishResult));
+        // Instagram processes the image asynchronously after creation —
+        // publishing immediately can hit "media not ready" if that
+        // processing hasn't finished yet (a real race condition, not a
+        // permissions issue). Poll the container's own status_code first
+        // and only publish once Instagram itself reports it's ready,
+        // rather than guessing with a fixed delay.
+        let mediaReady = false;
+        let lastStatus = 'UNKNOWN';
+        for (let attempt = 0; attempt < 10; attempt++) {
+          const statusRes = await fetch(`https://graph.facebook.com/v19.0/${created.id}?fields=status_code&access_token=${env.FB_PAGE_ACCESS_TOKEN}`);
+          const statusJson = await statusRes.json();
+          lastStatus = statusJson.status_code || lastStatus;
+          if (lastStatus === 'FINISHED') { mediaReady = true; break; }
+          if (lastStatus === 'ERROR') break;
+          await new Promise(r => setTimeout(r, 1000));
+        }
+
+        if (!mediaReady) {
+          result.instagram = { ok: false, detail: `Media never finished processing (last status: ${lastStatus}) — try again in a minute` };
+          console.error('postImageAndCaptionToSocial: Instagram media not ready after polling, status:', lastStatus);
         } else {
-          result.instagram = { ok: false, detail: 'Publish step failed: ' + JSON.stringify(publishResult).slice(0, 300) };
-          console.error('postImageAndCaptionToSocial: Instagram publish step failed:', publishRes.status, JSON.stringify(publishResult));
+          const publishRes = await fetch(`https://graph.facebook.com/v19.0/${env.IG_USER_ID}/media_publish`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({ creation_id: created.id, access_token: env.FB_PAGE_ACCESS_TOKEN }).toString(),
+          });
+          const publishResult = await publishRes.json();
+          if (publishRes.ok) {
+            result.instagram = { ok: true, detail: 'Posted' };
+            console.log('postImageAndCaptionToSocial: Instagram post OK', JSON.stringify(publishResult));
+          } else {
+            result.instagram = { ok: false, detail: 'Publish step failed: ' + JSON.stringify(publishResult).slice(0, 300) };
+            console.error('postImageAndCaptionToSocial: Instagram publish step failed:', publishRes.status, JSON.stringify(publishResult));
+          }
         }
       } else {
         result.instagram = { ok: false, detail: 'Media creation failed — no id returned: ' + JSON.stringify(created).slice(0, 300) };
