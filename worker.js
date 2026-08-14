@@ -472,6 +472,26 @@ Brew method: ${method}. Problem: ${issue}`;
         return jsonResponse({ items }, 200, ALLOWED_ORIGIN);
       }
 
+      // ── Admin manual social post — a genuine standalone tool, not tied
+      // to any listing. Reuses the exact same postImageAndCaptionToSocial()
+      // Graph API wiring the automatic listing posts use, so anything
+      // that's already proven to work there works here too. Custom
+      // caption text, optional custom image (upload via /upload/image
+      // first, same as the logo/photo dropzones) — falls back to the
+      // shared 66-photo rotation if no image is given, since Instagram
+      // requires an image for a feed post either way. Returns per-platform
+      // success/failure so the admin page can show real feedback. ──
+      if (path === '/admin/post-social' && request.method === 'POST') {
+        const { token, caption, imageUrl } = await request.json();
+        if (token !== env.ADMIN_TOKEN) return jsonResponse({ error: 'Forbidden' }, 403, ALLOWED_ORIGIN);
+        if (!caption || !caption.trim()) return jsonResponse({ error: 'Caption text is required' }, 400, ALLOWED_ORIGIN);
+        if (caption.length > 2200) return jsonResponse({ error: 'Caption is too long for Instagram (max 2200 characters)' }, 400, ALLOWED_ORIGIN);
+
+        const finalImageUrl = (imageUrl && imageUrl.trim()) ? imageUrl.trim() : await nextRotationImage(env);
+        const result = await postImageAndCaptionToSocial({ imageUrl: finalImageUrl, caption: caption.trim() }, env);
+        return jsonResponse({ posted: true, imageUrl: finalImageUrl, result }, 200, ALLOWED_ORIGIN);
+      }
+
       // ── APPLY — sends the application by email server-side, so a
       // candidate's CV (pasted once, remembered in their browser) doesn't
       // need re-attaching for every job. Also stores the application (with
@@ -945,10 +965,11 @@ async function runRenewalReminderJob(env, listings) {
 
 const SOCIAL_IMAGE_COUNT = 66;
 
-async function pickSocialImage(record, env) {
-  const custom = record.data && record.data.imageUrl && String(record.data.imageUrl).trim();
-  if (custom) return custom;
-
+// Advances the shared rotation counter and returns the next photo in the
+// 66-image set. Split out from pickSocialImage so a manual admin post
+// (which has no "record" at all) can fall back to the same rotation as
+// listing auto-posts, instead of needing its own separate counter.
+async function nextRotationImage(env) {
   const raw = await env.FDC_STORE.get('social:image-counter');
   const current = raw ? parseInt(raw, 10) : 0;
   const index = (current % SOCIAL_IMAGE_COUNT) + 1;
@@ -956,20 +977,31 @@ async function pickSocialImage(record, env) {
   return `${env.SITE_URL}/${index}.jpg`;
 }
 
-async function postToSocial(record, env) {
-  if (!env.FB_PAGE_ACCESS_TOKEN || !env.FB_PAGE_ID) {
-    console.error('postToSocial: not configured — missing FB_PAGE_ACCESS_TOKEN or FB_PAGE_ID');
-    return;
-  }
-  const d = record.data;
-  const isJob = record.kind === 'job';
-  const url = isJob ? `${env.SITE_URL}/job-board.html?id=${record.id}` : `${env.SITE_URL}/shift-cover.html?id=${record.id}`;
-  const caption = isJob
-    ? `New job: ${d.title} at ${d.venue}\n${d.location} · ${d.salary} · ${d.type}\n\nApply: ${url}\n\n#DublinJobs #HospitalityJobs #DublinCoffeeJobs`
-    : `Shift cover needed: ${d.role} at ${d.venue}\n${d.location} · ${d.date} ${d.hours} · ${d.rate}\n\nDetails: ${url}\n\n#DublinJobs #HospitalityJobs #DublinCoffeeJobs`;
+async function pickSocialImage(record, env) {
+  const custom = record.data && record.data.imageUrl && String(record.data.imageUrl).trim();
+  if (custom) return custom;
+  return nextRotationImage(env);
+}
 
-  const imageUrl = await pickSocialImage(record, env);
-  console.log('postToSocial: starting for listing', record.id, 'imageUrl:', imageUrl);
+// Shared posting core — does the actual Facebook Page + Instagram API
+// calls for a given image + caption (+ optional link, used for the FB
+// text-only fallback when the photo post fails). Used by BOTH the
+// automatic per-listing postToSocial() below AND the manual admin
+// "post anything" tool (see /admin/post-social), so there's exactly one
+// place that knows how to talk to the Graph API rather than two copies
+// that could drift apart. Returns a per-platform result object instead
+// of just logging, so a manual post can show the admin real feedback
+// rather than blind "it probably worked."
+async function postImageAndCaptionToSocial({ imageUrl, caption, link }, env) {
+  const result = { facebook: { ok: false, detail: '' }, instagram: { ok: false, detail: '' } };
+
+  if (!env.FB_PAGE_ACCESS_TOKEN || !env.FB_PAGE_ID) {
+    const detail = 'Not configured — missing FB_PAGE_ACCESS_TOKEN or FB_PAGE_ID';
+    console.error('postImageAndCaptionToSocial:', detail);
+    result.facebook.detail = detail;
+    result.instagram.detail = detail;
+    return result;
+  }
 
   try {
     const photoRes = await fetch(`https://graph.facebook.com/v19.0/${env.FB_PAGE_ID}/photos`, {
@@ -981,23 +1013,29 @@ async function postToSocial(record, env) {
       const errBody = await photoRes.text();
       throw new Error('FB photo post failed: ' + photoRes.status + ' ' + errBody);
     }
-    console.log('postToSocial: Facebook photo post OK for', record.id);
+    result.facebook = { ok: true, detail: 'Posted with photo' };
+    console.log('postImageAndCaptionToSocial: Facebook photo post OK');
   } catch (e) {
-    console.error('postToSocial: Facebook photo post failed, trying text fallback:', String(e));
+    console.error('postImageAndCaptionToSocial: Facebook photo post failed, trying text fallback:', String(e));
     try {
+      const feedBody = { message: caption, access_token: env.FB_PAGE_ACCESS_TOKEN };
+      if (link) feedBody.link = link;
       const feedRes = await fetch(`https://graph.facebook.com/v19.0/${env.FB_PAGE_ID}/feed`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({ message: caption, link: url, access_token: env.FB_PAGE_ACCESS_TOKEN }).toString(),
+        body: new URLSearchParams(feedBody).toString(),
       });
       if (!feedRes.ok) {
         const errBody = await feedRes.text();
-        console.error('postToSocial: Facebook text fallback ALSO failed:', feedRes.status, errBody);
+        result.facebook = { ok: false, detail: 'Photo post AND text fallback both failed: ' + errBody.slice(0, 300) };
+        console.error('postImageAndCaptionToSocial: Facebook text fallback ALSO failed:', feedRes.status, errBody);
       } else {
-        console.log('postToSocial: Facebook text fallback OK for', record.id);
+        result.facebook = { ok: true, detail: 'Photo post failed, posted as text instead' };
+        console.log('postImageAndCaptionToSocial: Facebook text fallback OK');
       }
     } catch (e2) {
-      console.error('postToSocial: Facebook text fallback threw an exception:', String(e2));
+      result.facebook = { ok: false, detail: 'Threw an exception: ' + String(e2).slice(0, 300) };
+      console.error('postImageAndCaptionToSocial: Facebook text fallback threw an exception:', String(e2));
     }
   }
 
@@ -1017,19 +1055,39 @@ async function postToSocial(record, env) {
         });
         const publishResult = await publishRes.json();
         if (publishRes.ok) {
-          console.log('postToSocial: Instagram post OK for', record.id, JSON.stringify(publishResult));
+          result.instagram = { ok: true, detail: 'Posted' };
+          console.log('postImageAndCaptionToSocial: Instagram post OK', JSON.stringify(publishResult));
         } else {
-          console.error('postToSocial: Instagram publish step failed:', publishRes.status, JSON.stringify(publishResult));
+          result.instagram = { ok: false, detail: 'Publish step failed: ' + JSON.stringify(publishResult).slice(0, 300) };
+          console.error('postImageAndCaptionToSocial: Instagram publish step failed:', publishRes.status, JSON.stringify(publishResult));
         }
       } else {
-        console.error('postToSocial: Instagram media creation failed — no id returned:', JSON.stringify(created));
+        result.instagram = { ok: false, detail: 'Media creation failed — no id returned: ' + JSON.stringify(created).slice(0, 300) };
+        console.error('postImageAndCaptionToSocial: Instagram media creation failed — no id returned:', JSON.stringify(created));
       }
     } else {
-      console.error('postToSocial: IG_USER_ID not set — skipping Instagram');
+      result.instagram = { ok: false, detail: 'IG_USER_ID not set — skipped' };
+      console.error('postImageAndCaptionToSocial: IG_USER_ID not set — skipping Instagram');
     }
   } catch (e) {
-    console.error('postToSocial: Instagram step threw an exception:', String(e));
+    result.instagram = { ok: false, detail: 'Threw an exception: ' + String(e).slice(0, 300) };
+    console.error('postImageAndCaptionToSocial: Instagram step threw an exception:', String(e));
   }
+
+  return result;
+}
+
+async function postToSocial(record, env) {
+  const d = record.data;
+  const isJob = record.kind === 'job';
+  const url = isJob ? `${env.SITE_URL}/job-board.html?id=${record.id}` : `${env.SITE_URL}/shift-cover.html?id=${record.id}`;
+  const caption = isJob
+    ? `New job: ${d.title} at ${d.venue}\n${d.location} · ${d.salary} · ${d.type}\n\nApply: ${url}\n\n#DublinJobs #HospitalityJobs #DublinCoffeeJobs`
+    : `Shift cover needed: ${d.role} at ${d.venue}\n${d.location} · ${d.date} ${d.hours} · ${d.rate}\n\nDetails: ${url}\n\n#DublinJobs #HospitalityJobs #DublinCoffeeJobs`;
+
+  const imageUrl = await pickSocialImage(record, env);
+  console.log('postToSocial: starting for listing', record.id, 'imageUrl:', imageUrl);
+  await postImageAndCaptionToSocial({ imageUrl, caption, link: url }, env);
 }
 
 async function sendEmailTo(env, to, subject, text, replyTo) {
