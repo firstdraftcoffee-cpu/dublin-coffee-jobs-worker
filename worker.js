@@ -986,6 +986,26 @@ async function pickSocialImage(record, env) {
   return nextRotationImage(env);
 }
 
+// Exchanges the long-lived System User token (stored as
+// FB_PAGE_ACCESS_TOKEN) for a genuine Page-scoped access token, fresh,
+// every time this is called. Facebook's /{page-id}/photos and /feed
+// endpoints require an actual Page token — a System User's own token,
+// even with Full access to the Page as a business asset, gets rejected
+// with a misleading "publish_actions deprecated" error rather than a
+// clear one. This exchange is the standard documented pattern for
+// System User → Page posting (see developers.facebook.com/docs/pages
+// /access-tokens) and means the Cloudflare secret only ever needs to
+// hold the non-expiring System User token — never a separate Page token
+// that would need manually regenerating and re-pasting later.
+async function getPageAccessToken(env) {
+  const res = await fetch(`https://graph.facebook.com/v19.0/${env.FB_PAGE_ID}?fields=access_token&access_token=${env.FB_PAGE_ACCESS_TOKEN}`);
+  const data = await res.json();
+  if (!data.access_token) {
+    throw new Error('Could not exchange for a Page access token: ' + JSON.stringify(data).slice(0, 300));
+  }
+  return data.access_token;
+}
+
 // Shared posting core — does the actual Facebook Page + Instagram API
 // calls for a given image + caption (+ optional link, used for the FB
 // text-only fallback when the photo post fails). Used by BOTH the
@@ -1006,11 +1026,25 @@ async function postImageAndCaptionToSocial({ imageUrl, caption, link }, env) {
     return result;
   }
 
+  // Instagram's endpoints have worked fine with the raw System User
+  // token directly, so only the Facebook Page calls below need the
+  // exchanged Page token. If the exchange itself fails, Facebook is
+  // marked failed with a clear reason but Instagram still proceeds
+  // normally further down — the two platforms are independent.
+  let pageToken = null;
+  try {
+    pageToken = await getPageAccessToken(env);
+  } catch (e) {
+    result.facebook.detail = String(e).slice(0, 300);
+    console.error('postImageAndCaptionToSocial: Page token exchange failed:', String(e));
+  }
+
+  if (pageToken) {
   try {
     const photoRes = await fetch(`https://graph.facebook.com/v19.0/${env.FB_PAGE_ID}/photos`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ url: imageUrl, caption, access_token: env.FB_PAGE_ACCESS_TOKEN }).toString(),
+      body: new URLSearchParams({ url: imageUrl, caption, access_token: pageToken }).toString(),
     });
     if (!photoRes.ok) {
       const errBody = await photoRes.text();
@@ -1021,7 +1055,7 @@ async function postImageAndCaptionToSocial({ imageUrl, caption, link }, env) {
   } catch (e) {
     console.error('postImageAndCaptionToSocial: Facebook photo post failed, trying text fallback:', String(e));
     try {
-      const feedBody = { message: caption, access_token: env.FB_PAGE_ACCESS_TOKEN };
+      const feedBody = { message: caption, access_token: pageToken };
       if (link) feedBody.link = link;
       const feedRes = await fetch(`https://graph.facebook.com/v19.0/${env.FB_PAGE_ID}/feed`, {
         method: 'POST',
@@ -1040,6 +1074,7 @@ async function postImageAndCaptionToSocial({ imageUrl, caption, link }, env) {
       result.facebook = { ok: false, detail: 'Threw an exception: ' + String(e2).slice(0, 300) };
       console.error('postImageAndCaptionToSocial: Facebook text fallback threw an exception:', String(e2));
     }
+  }
   }
 
   try {
