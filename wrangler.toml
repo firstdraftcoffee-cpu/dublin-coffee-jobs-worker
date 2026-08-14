@@ -5,6 +5,7 @@ compatibility_date = "2026-07-25"
 [vars]
 SITE_URL = "https://dublincoffeejobs.com"
 ALERT_EMAIL_TO = "your-firstdraftcoffee@gmail.com"
+R2_PUBLIC_URL = "https://pub-9006ac83344649a5b76348e351676830.r2.dev"
 
 [[kv_namespaces]]
 binding = "FDC_STORE"
