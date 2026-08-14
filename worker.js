@@ -1,7 +1,8 @@
 // ═══════════════════════════════════════════════════════════════
 // First Draft Coffee — Unified Cloudflare Worker (v2)
 // Handles: CV Review, Brew Compass, Job Listings, Shift Cover,
-//          Stripe Checkout + Webhook, Flag/Report alerts
+//          Stripe Checkout + Webhook, Flag/Report alerts,
+//          Application digest mode, renewal reminders
 // ═══════════════════════════════════════════════════════════════
 
 const PRICE_IDS = {
@@ -349,6 +350,22 @@ Brew method: ${method}. Problem: ${issue}`;
         return jsonResponse({ items }, 200, ALLOWED_ORIGIN);
       }
 
+      // Public lookup by ID only, no email check — used to pre-fill a
+      // FRESH post from an expiring listing's renewal-reminder email link.
+      // Deliberately unauthenticated like the existing public listing
+      // detail view: it only feeds data into a new, unpublished post draft
+      // in the visitor's own browser, it doesn't edit or expose anything
+      // about the original listing that isn't already visible on the
+      // public board while that listing is live.
+      if (path === '/listings/lookup' && request.method === 'GET') {
+        const id = url.searchParams.get('id');
+        if (!id) return jsonResponse({ error: 'Missing id' }, 400, ALLOWED_ORIGIN);
+        const raw = await env.FDC_STORE.get(`listing:${id}`);
+        if (!raw) return jsonResponse({ error: 'Listing not found or expired' }, 404, ALLOWED_ORIGIN);
+        const record = JSON.parse(raw);
+        return jsonResponse({ record }, 200, ALLOWED_ORIGIN);
+      }
+
       if (path === '/listings/view' && request.method === 'POST') {
         const { id } = await request.json();
         if (!id) return jsonResponse({ error: 'Missing id' }, 400, ALLOWED_ORIGIN);
@@ -431,6 +448,11 @@ Brew method: ${method}. Problem: ${issue}`;
         if (typeof extendDays === 'number' && extendDays > 0) {
           const base = Math.max(record.expiresAt || 0, Date.now());
           record.expiresAt = base + extendDays * 24 * 60 * 60 * 1000;
+          // A manual extend is a fresh lease on life for this listing —
+          // clear the renewal-reminder flag so it can remind again ahead
+          // of the new (later) expiry instead of staying silently marked
+          // as "already reminded" from before the extension.
+          record.renewReminderSent = false;
         }
         const remainingTtl = record.expiresAt ? Math.max(60, Math.floor((record.expiresAt - Date.now()) / 1000)) : 60 * 60 * 24 * 14;
         await env.FDC_STORE.put(`listing:${id}`, JSON.stringify(record), { expirationTtl: remainingTtl });
@@ -450,11 +472,17 @@ Brew method: ${method}. Problem: ${issue}`;
         return jsonResponse({ items }, 200, ALLOWED_ORIGIN);
       }
 
-      // ── NEW: APPLY — sends the application by email server-side, so a
+      // ── APPLY — sends the application by email server-side, so a
       // candidate's CV (pasted once, remembered in their browser) doesn't
       // need re-attaching for every job. Also stores the application (with
       // a job-specific match score, unless the employer opted out) so the
-      // employer can view a ranked shortlist later at /applicants ──
+      // employer can view a ranked shortlist later at /applicants.
+      //
+      // If the listing has digestMode on, the instant employer email is
+      // skipped here — the daily digest job (see runDigestJob below) picks
+      // it up and includes it in that listing's next summary email
+      // instead. The candidate's own confirmation email is unaffected
+      // either way — they always hear back immediately. ──
       if (path === '/apply' && request.method === 'POST') {
         const { employerEmail, name, candidateEmail, role, about, cv, cvFileUrl, jobTitle, listingId } = await request.json();
         if (!employerEmail || !name || !candidateEmail) {
@@ -476,12 +504,14 @@ Brew method: ${method}. Problem: ${issue}`;
         let score = null;
         let highlights = null;
         let skipScoring = false;
+        let digestMode = false;
         let jobDesc = '';
         if (listingId) {
           const listingRaw = await env.FDC_STORE.get(`listing:${listingId}`);
           if (listingRaw) {
             const listing = JSON.parse(listingRaw);
             skipScoring = !!listing.data.skipScoring;
+            digestMode = !!listing.data.digestMode;
             jobDesc = listing.data.desc || '';
           }
         }
@@ -504,11 +534,13 @@ Brew method: ${method}. Problem: ${issue}`;
           await env.FDC_STORE.put(`application:${listingId}:${appId}`, JSON.stringify(application), { expirationTtl: 60 * 60 * 24 * 45 });
         }
 
-        const subject = `Application: ${jobTitle || 'Role'} — ${name}`;
-        const scoreLine = score !== null ? `\nMatch score for this role: ${score}/100\n${(highlights || []).map(h => '- ' + h).join('\n')}\n` : '';
-        const cvFileLine = cvFileUrl ? `\nAttached CV file: ${cvFileUrl}\n` : '';
-        const text = `New application via Dublin Coffee Jobs\n\nRole: ${jobTitle || ''}\nName: ${name}\nEmail: ${candidateEmail}\nRole/experience: ${role || ''}\n${scoreLine}${about ? '\nNote: ' + about + '\n' : ''}${cvFileLine}\n${cv ? '\n--- CV (pasted text) ---\n' + cv + '\n' : '\n(No CV text pasted)\n'}${listingId ? `\nView the full shortlist for this job: ${env.SITE_URL}/applicants.html?listingId=${listingId}&email=${encodeURIComponent(employerEmail)}\n` : ''}`;
-        await sendEmailTo(env, employerEmail, subject, text, candidateEmail);
+        if (!digestMode) {
+          const subject = `Application: ${jobTitle || 'Role'} — ${name}`;
+          const scoreLine = score !== null ? `\nMatch score for this role: ${score}/100\n${(highlights || []).map(h => '- ' + h).join('\n')}\n` : '';
+          const cvFileLine = cvFileUrl ? `\nAttached CV file: ${cvFileUrl}\n` : '';
+          const text = `New application via Dublin Coffee Jobs\n\nRole: ${jobTitle || ''}\nName: ${name}\nEmail: ${candidateEmail}\nRole/experience: ${role || ''}\n${scoreLine}${about ? '\nNote: ' + about + '\n' : ''}${cvFileLine}\n${cv ? '\n--- CV (pasted text) ---\n' + cv + '\n' : '\n(No CV text pasted)\n'}${listingId ? `\nView the full shortlist for this job: ${env.SITE_URL}/applicants.html?listingId=${listingId}&email=${encodeURIComponent(employerEmail)}\n` : ''}`;
+          await sendEmailTo(env, employerEmail, subject, text, candidateEmail);
+        }
         ctx.waitUntil(sendApplicationConfirmation({ candidateEmail, name, jobTitle, score, highlights }, env));
         return jsonResponse({ sent: true, score }, 200, ALLOWED_ORIGIN);
       }
@@ -567,6 +599,11 @@ Brew method: ${method}. Problem: ${issue}`;
         if ((record.data.email || '').toLowerCase() !== email.toLowerCase()) {
           return jsonResponse({ error: 'That email doesn\'t match the one this listing was posted under' }, 403, ALLOWED_ORIGIN);
         }
+        // Surface the view count back to the employer here too (previously
+        // only shown to the board itself) — the edit modal is the natural
+        // place for an employer to check how their listing's doing.
+        const viewsRaw = await env.FDC_STORE.get(`views:${id}`);
+        record.views = viewsRaw ? parseInt(viewsRaw, 10) : 0;
         return jsonResponse({ record }, 200, ALLOWED_ORIGIN);
       }
 
@@ -651,6 +688,14 @@ Brew method: ${method}. Problem: ${issue}`;
       alert.lastChecked = Date.now();
       await env.FDC_STORE.put(key.name, JSON.stringify(alert), { expirationTtl: 60 * 60 * 24 * 90 });
     }
+
+    // These two are naturally daily-cadence jobs (a digest and an
+    // expiry-window reminder), but the cron trigger itself may fire more
+    // often than once a day. Each function gates its own real work
+    // internally so it's safe to call every scheduled run regardless of
+    // how frequently the trigger actually fires.
+    await runDigestJob(env, listings);
+    await runRenewalReminderJob(env, listings);
   }
 };
 
@@ -810,6 +855,92 @@ async function sendApplicationConfirmation({ candidateEmail, name, jobTitle, sco
     : '';
   const text = `Hi ${name || ''},\n\nYour application to ${jobTitle || 'this role'} has been sent to the employer.\n${scoreLine}\nGood luck!\n\n— Dublin Coffee Jobs`;
   await sendEmailTo(env, candidateEmail, subject, text);
+}
+
+// Runs at most once roughly every ~23 hours (gated on a stored
+// timestamp, since the cron trigger itself may fire more often). For
+// every non-flagged job/shift listing with digestMode on, gathers any
+// applications received since that listing's last digest email and, if
+// there are any, sends one ranked summary email. Per-listing "last sent"
+// state is tracked in digestSent:<id> rather than a global timestamp, so
+// a listing posted partway through the day still gets its first digest
+// covering everything since it went live, not since the last global run.
+async function runDigestJob(env, listings) {
+  const lastRunRaw = await env.FDC_STORE.get('digest:lastRun');
+  const lastRun = lastRunRaw ? parseInt(lastRunRaw, 10) : 0;
+  const NEARLY_A_DAY = 23 * 60 * 60 * 1000;
+  if (Date.now() - lastRun < NEARLY_A_DAY) return;
+  await env.FDC_STORE.put('digest:lastRun', String(Date.now()));
+
+  for (const listing of listings) {
+    if (listing.flagged || !listing.data || !listing.data.digestMode || !listing.data.email) continue;
+
+    const sinceRaw = await env.FDC_STORE.get(`digestSent:${listing.id}`);
+    const since = sinceRaw ? parseInt(sinceRaw, 10) : (listing.createdAt || 0);
+
+    const appList = await env.FDC_STORE.list({ prefix: `application:${listing.id}:` });
+    const fresh = [];
+    for (const appKey of appList.keys) {
+      const appRaw = await env.FDC_STORE.get(appKey.name);
+      if (!appRaw) continue;
+      const app = JSON.parse(appRaw);
+      if (app.appliedAt > since) fresh.push(app);
+    }
+
+    if (fresh.length > 0) {
+      fresh.sort((a, b) => (b.score ?? -1) - (a.score ?? -1));
+      const lines = fresh.map(a => `- ${a.name}${a.score !== null && a.score !== undefined ? ` — match ${a.score}/100` : ''} (${a.candidateEmail})`).join('\n');
+      const title = listing.data.title || listing.data.role || 'your listing';
+      const shortlistUrl = `${env.SITE_URL}/applicants.html?listingId=${listing.id}&email=${encodeURIComponent(listing.data.email)}`;
+      await sendEmailTo(env, listing.data.email,
+        `Daily digest: ${fresh.length} new application${fresh.length > 1 ? 's' : ''} — ${title}`,
+        `${fresh.length} new application${fresh.length > 1 ? 's' : ''} came in for ${title}${listing.data.venue ? ' at ' + listing.data.venue : ''} in the last day, ranked by match score:\n\n${lines}\n\nView the full shortlist: ${shortlistUrl}\n\nYou're getting one email a day instead of one per applicant because digest mode is turned on for this listing — change it any time from "Edit a listing".`);
+    }
+    await env.FDC_STORE.put(`digestSent:${listing.id}`, String(Date.now()), { expirationTtl: 60 * 60 * 24 * 60 });
+  }
+}
+
+// Runs at most once roughly every ~23 hours, same gating pattern as the
+// digest job above (separate timestamp key so the two don't interfere).
+// Finds paid job/shift listings expiring within the next 2 days that
+// haven't already had a reminder sent, and emails a one-click renew link
+// — opens the post form on the site pre-filled with this listing's
+// details via /listings/lookup, ready to pay and go live again as a
+// fresh listing. renewReminderSent guarantees at most one reminder per
+// listing; it's cleared again if the listing is later manually extended
+// via /admin/listing (see extendDays handling above).
+async function runRenewalReminderJob(env, listings) {
+  const lastRunRaw = await env.FDC_STORE.get('renewalReminder:lastRun');
+  const lastRun = lastRunRaw ? parseInt(lastRunRaw, 10) : 0;
+  const NEARLY_A_DAY = 23 * 60 * 60 * 1000;
+  if (Date.now() - lastRun < NEARLY_A_DAY) return;
+  await env.FDC_STORE.put('renewalReminder:lastRun', String(Date.now()));
+
+  const WINDOW = 2 * 24 * 60 * 60 * 1000;
+
+  for (const listing of listings) {
+    if (listing.flagged || listing.renewReminderSent) continue;
+    if (listing.kind !== 'job' && listing.kind !== 'shift_need') continue; // not "available" posts — those aren't paid listings to renew
+    if (!listing.expiresAt || !listing.data || !listing.data.email) continue;
+
+    const remaining = listing.expiresAt - Date.now();
+    if (remaining <= 0 || remaining > WINDOW) continue;
+
+    const title = listing.data.title || listing.data.role || 'Your listing';
+    const isJob = listing.kind === 'job';
+    const renewUrl = isJob
+      ? `${env.SITE_URL}/job-board.html?renew=${listing.id}`
+      : `${env.SITE_URL}/shift-cover.html?renew=${listing.id}`;
+    const daysLeft = Math.max(1, Math.ceil(remaining / (24 * 60 * 60 * 1000)));
+
+    await sendEmailTo(env, listing.data.email,
+      `${title} expires in ${daysLeft} day${daysLeft > 1 ? 's' : ''} — renew it?`,
+      `${title}${listing.data.venue ? ' at ' + listing.data.venue : ''} expires in ${daysLeft} day${daysLeft > 1 ? 's' : ''}.\n\nStill hiring or still need cover? Renew it in one click — it opens a fresh post pre-filled with these details, ready to pay and go live again:\n\n${renewUrl}\n\nIf you're all sorted, no action needed — it'll just expire quietly and this is the only reminder you'll get for it.`);
+
+    listing.renewReminderSent = true;
+    const remainingTtl = Math.max(60, Math.floor((listing.expiresAt - Date.now()) / 1000));
+    await env.FDC_STORE.put(`listing:${listing.id}`, JSON.stringify(listing), { expirationTtl: remainingTtl });
+  }
 }
 
 const SOCIAL_IMAGE_COUNT = 66;
