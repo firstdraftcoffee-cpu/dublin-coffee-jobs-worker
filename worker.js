@@ -375,12 +375,35 @@ Brew method: ${method}. Problem: ${issue}`;
               ctx.waitUntil(sendEmailTo(env, revealBuyerEmail, 'Contact details unlocked',
                 'Sorry — that listing has since expired or been removed, so we can\'t send its contact details. If you were charged, reply to this email and we\'ll sort a refund.'));
             }
-          } else if (session.mode === 'subscription') {
+                   } else if (session.mode === 'subscription') {
+            // IMPORTANT: this webhook endpoint receives subscription events
+            // for the whole Stripe account, not just Dublin Coffee Jobs —
+            // other First Draft Coffee products (e.g. Coffee Deck Pro) also
+            // create subscription-mode checkout sessions with no DCJ
+            // metadata, and used to fall through to here by exclusion,
+            // wrongly sending the DCJ confirmation email to their
+            // subscribers. Always confirm the actual price before emailing.
             const subscriberEmail = session.customer_email || session.customer_details?.email;
-            console.log('Subscription webhook — subscriberEmail:', subscriberEmail);
-            if (subscriberEmail) {
+            let isEmployerSub = false;
+            try {
+              const liRes = await fetch(`https://api.stripe.com/v1/checkout/sessions/${session.id}/line_items`, {
+                headers: { 'Authorization': `Bearer ${env.STRIPE_SECRET_KEY}` },
+              });
+              if (liRes.ok) {
+                const liData = await liRes.json();
+                isEmployerSub = (liData.data || []).some(li => li.price?.id === PRICE_IDS.job_retainer);
+              } else {
+                console.error('Subscription webhook: failed to fetch line items, status', liRes.status);
+              }
+            } catch (e) {
+              console.error('Subscription webhook: error fetching line items:', String(e));
+            }
+            console.log('Subscription webhook — subscriberEmail:', subscriberEmail, 'isEmployerSub:', isEmployerSub);
+            if (isEmployerSub && subscriberEmail) {
               ctx.waitUntil(sendEmailTo(env, subscriberEmail, 'Your Dublin Coffee Jobs subscription is active',
                 `Thanks for subscribing to unlimited job posts on Dublin Coffee Jobs.\n\nYour subscription is now active. From here:\n\n- Post as many jobs as you like at ${env.SITE_URL}/job-board.html — use this same email address (${subscriberEmail}) each time and it'll publish free automatically, no checkout needed.\n- Add a logo URL when posting and it'll show on your listings.\n- Manage or cancel any time from the receipt/invoice email Stripe sends separately, or by contacting us directly.\n\nQuestions — just reply to this email.`));
+            } else if (!isEmployerSub) {
+              console.log('Subscription webhook: not a DCJ Employer Subscription (different product on the same Stripe account) — no email sent.');
             } else {
               console.error('Subscription webhook fired but no subscriberEmail found on session — email not sent.');
             }
