@@ -15,6 +15,7 @@ const PRICE_IDS = {
   shift_need:         'price_1TvbIvJExrSWtqFLmhrDFPKU',
   shift_need_urgent:  'price_1Tusg8JExrSWtqFLBMrLWFbD',
   cv_full:            'price_1TvbGRJExrSWtqFLSdBRAtZI',
+  contact_reveal:     'price_1U66JFJExrSWtqFLSuhdfQ06', // €10 one-off — reveal contact for one "available" listing
 };
 
 const LISTING_DAYS = { job_standard: 14, job_featured: 30, shift_need: 7, shift_need_urgent: 7 };
@@ -274,6 +275,46 @@ Brew method: ${method}. Problem: ${issue}`;
         return jsonResponse({ checkoutUrl: session.url }, 200, ALLOWED_ORIGIN);
       }
 
+      // Pay-to-reveal contact details for one specific "available" staff
+      // post — the simple version, no bundled pass/expiry/posting-bypass.
+      // One-off Stripe Checkout keyed to a specific listingId + the
+      // buyer's own email via metadata; the webhook below does the actual
+      // reveal once payment completes, by emailing the real contact
+      // details straight to the buyer. No state to track before payment.
+      if (path === '/listings/reveal-contact/create' && request.method === 'POST') {
+        const { listingId, buyerEmail } = await request.json();
+        if (!listingId || !buyerEmail) return jsonResponse({ error: 'Missing listingId or buyerEmail' }, 400, ALLOWED_ORIGIN);
+        const normalizedEmail = buyerEmail.trim().toLowerCase();
+
+        const listingRaw = await env.FDC_STORE.get(`listing:${listingId}`);
+        if (!listingRaw) return jsonResponse({ error: 'That listing was not found or has expired' }, 404, ALLOWED_ORIGIN);
+        const listing = JSON.parse(listingRaw);
+        if (listing.kind !== 'shift_available') return jsonResponse({ error: 'That listing is not an availability post' }, 400, ALLOWED_ORIGIN);
+
+        const priceId = PRICE_IDS.contact_reveal;
+        if (!priceId) return jsonResponse({ error: 'Contact reveal not configured yet' }, 400, ALLOWED_ORIGIN);
+
+        const params = new URLSearchParams();
+        params.append('mode', 'payment');
+        params.append('allow_promotion_codes', 'true');
+        params.append('customer_email', normalizedEmail);
+        params.append('line_items[0][price]', priceId);
+        params.append('line_items[0][quantity]', '1');
+        params.append('success_url', `${env.SITE_URL}/shift-cover.html?revealSuccess=1`);
+        params.append('cancel_url', `${env.SITE_URL}/shift-cover.html?revealCancelled=1`);
+        params.append('metadata[revealListingId]', listingId);
+        params.append('metadata[revealBuyerEmail]', normalizedEmail);
+
+        const res = await fetch('https://api.stripe.com/v1/checkout/sessions', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${env.STRIPE_SECRET_KEY}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: params.toString(),
+        });
+        if (!res.ok) { const errText = await res.text(); return jsonResponse({ error: 'Stripe: ' + errText.slice(0,200) }, 500, ALLOWED_ORIGIN); }
+        const session = await res.json();
+        return jsonResponse({ checkoutUrl: session.url }, 200, ALLOWED_ORIGIN);
+      }
+
       if (path === '/webhook/stripe' && request.method === 'POST') {
         const sig = request.headers.get('stripe-signature');
         const rawBody = await request.text();
@@ -285,6 +326,8 @@ Brew method: ${method}. Problem: ${issue}`;
           const session = event.data.object;
           const listingId = session.metadata?.listingId;
           const reviewId = session.metadata?.reviewId;
+          const revealListingId = session.metadata?.revealListingId;
+          const revealBuyerEmail = session.metadata?.revealBuyerEmail;
           if (listingId) {
             const pendingRaw = await env.FDC_STORE.get(`pending:${listingId}`);
             if (pendingRaw) {
@@ -321,6 +364,17 @@ Brew method: ${method}. Problem: ${issue}`;
                 }
               })());
             }
+          } else if (revealListingId && revealBuyerEmail) {
+            const targetRaw = await env.FDC_STORE.get(`listing:${revealListingId}`);
+            if (targetRaw) {
+              const target = JSON.parse(targetRaw);
+              const d = target.data || {};
+              const text = `Here's the contact info you paid to reveal:\n\nRole: ${d.role || 'Barista'}\nArea: ${d.area || ''}\n${d.rate ? 'Min. rate: ' + d.rate + '\n' : ''}\nEmail: ${d.email || 'not provided'}\n${d.whatsapp ? 'WhatsApp: ' + d.whatsapp + '\n' : ''}\nReach out directly — this is between you and them from here.`;
+              ctx.waitUntil(sendEmailTo(env, revealBuyerEmail, 'Contact details unlocked', text));
+            } else {
+              ctx.waitUntil(sendEmailTo(env, revealBuyerEmail, 'Contact details unlocked',
+                'Sorry — that listing has since expired or been removed, so we can\'t send its contact details. If you were charged, reply to this email and we\'ll sort a refund.'));
+            }
           } else if (session.mode === 'subscription') {
             const subscriberEmail = session.customer_email || session.customer_details?.email;
             console.log('Subscription webhook — subscriberEmail:', subscriberEmail);
@@ -335,6 +389,16 @@ Brew method: ${method}. Problem: ${issue}`;
         return new Response('ok', { status: 200 });
       }
 
+      // Public board listing. For kind=shift_available, this is also
+      // where the monetisation leak used to live: email and whatsapp
+      // were sent to every visitor for free, letting employers contact
+      // available staff directly without ever paying for anything —
+      // hiding the contact buttons in the UI alone wouldn't have been
+      // enough, since the raw data was still sitting right there in this
+      // response for anyone to read. Those two fields are now always
+      // stripped for this kind; real contact details only ever leave the
+      // server via email, after a successful reveal-contact payment (see
+      // /listings/reveal-contact/create and the webhook below).
       if (path === '/listings' && request.method === 'GET') {
         const kind = url.searchParams.get('kind');
         const list = await env.FDC_STORE.list({ prefix: 'listing:' });
@@ -347,6 +411,10 @@ Brew method: ${method}. Problem: ${issue}`;
           if (kind && record.kind !== kind) continue;
           const viewsRaw = await env.FDC_STORE.get(`views:${record.id}`);
           record.views = viewsRaw ? parseInt(viewsRaw, 10) : 0;
+          if (record.kind === 'shift_available') {
+            record.data = { ...record.data, email: undefined, whatsapp: undefined };
+            record.contactLocked = true;
+          }
           items.push(record);
         }
         items.sort((a, b) => b.createdAt - a.createdAt);
