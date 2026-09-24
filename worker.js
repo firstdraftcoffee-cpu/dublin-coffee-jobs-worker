@@ -5,8 +5,7 @@
 //          Application digest mode, renewal reminders
 // (redeploy trigger — forces this commit to promote to 100% traffic
 // via the normal GitHub deploy path, rather than a dashboard-only
-// secret edit that can get stuck at 0% traffic. Used again 26 Aug 2026
-// to force the rolled STRIPE_SECRET_KEY live after it got stuck at 0%.)
+// secret edit that can get stuck at 0% traffic)
 // ═══════════════════════════════════════════════════════════════
 
 const PRICE_IDS = {
@@ -376,12 +375,35 @@ Brew method: ${method}. Problem: ${issue}`;
               ctx.waitUntil(sendEmailTo(env, revealBuyerEmail, 'Contact details unlocked',
                 'Sorry — that listing has since expired or been removed, so we can\'t send its contact details. If you were charged, reply to this email and we\'ll sort a refund.'));
             }
-          } else if (session.mode === 'subscription') {
+                   } else if (session.mode === 'subscription') {
+            // IMPORTANT: this webhook endpoint receives subscription events
+            // for the whole Stripe account, not just Dublin Coffee Jobs —
+            // other First Draft Coffee products (e.g. Coffee Deck Pro) also
+            // create subscription-mode checkout sessions with no DCJ
+            // metadata, and used to fall through to here by exclusion,
+            // wrongly sending the DCJ confirmation email to their
+            // subscribers. Always confirm the actual price before emailing.
             const subscriberEmail = session.customer_email || session.customer_details?.email;
-            console.log('Subscription webhook — subscriberEmail:', subscriberEmail);
-            if (subscriberEmail) {
+            let isEmployerSub = false;
+            try {
+              const liRes = await fetch(`https://api.stripe.com/v1/checkout/sessions/${session.id}/line_items`, {
+                headers: { 'Authorization': `Bearer ${env.STRIPE_SECRET_KEY}` },
+              });
+              if (liRes.ok) {
+                const liData = await liRes.json();
+                isEmployerSub = (liData.data || []).some(li => li.price?.id === PRICE_IDS.job_retainer);
+              } else {
+                console.error('Subscription webhook: failed to fetch line items, status', liRes.status);
+              }
+            } catch (e) {
+              console.error('Subscription webhook: error fetching line items:', String(e));
+            }
+            console.log('Subscription webhook — subscriberEmail:', subscriberEmail, 'isEmployerSub:', isEmployerSub);
+            if (isEmployerSub && subscriberEmail) {
               ctx.waitUntil(sendEmailTo(env, subscriberEmail, 'Your Dublin Coffee Jobs subscription is active',
                 `Thanks for subscribing to unlimited job posts on Dublin Coffee Jobs.\n\nYour subscription is now active. From here:\n\n- Post as many jobs as you like at ${env.SITE_URL}/job-board.html — use this same email address (${subscriberEmail}) each time and it'll publish free automatically, no checkout needed.\n- Add a logo URL when posting and it'll show on your listings.\n- Manage or cancel any time from the receipt/invoice email Stripe sends separately, or by contacting us directly.\n\nQuestions — just reply to this email.`));
+            } else if (!isEmployerSub) {
+              console.log('Subscription webhook: not a DCJ Employer Subscription (different product on the same Stripe account) — no email sent.');
             } else {
               console.error('Subscription webhook fired but no subscriberEmail found on session — email not sent.');
             }
@@ -435,6 +457,13 @@ Brew method: ${method}. Problem: ${issue}`;
         const raw = await env.FDC_STORE.get(`listing:${id}`);
         if (!raw) return jsonResponse({ error: 'Listing not found or expired' }, 404, ALLOWED_ORIGIN);
         const record = JSON.parse(raw);
+        // Same rule as the public board: an "available" post's email and
+        // WhatsApp are only ever released through the paid reveal. Without
+        // this, anyone could read them here for free using the listing ID.
+        if (record.kind === 'shift_available') {
+          record.data = { ...record.data, email: undefined, whatsapp: undefined };
+          record.contactLocked = true;
+        }
         return jsonResponse({ record }, 200, ALLOWED_ORIGIN);
       }
 
@@ -456,6 +485,11 @@ Brew method: ${method}. Problem: ${issue}`;
         return jsonResponse({ created: true }, 200, ALLOWED_ORIGIN);
       }
 
+      // Reporting a listing. It used to hide the listing instantly on a
+      // single report from anyone, which meant one person could knock every
+      // paid listing off the board. Now each report is logged and emailed to
+      // the admin (with one-click Hide / Delete links), and a listing is only
+      // hidden automatically once 3 different people have reported it.
       if (path === '/flag' && request.method === 'POST') {
         const { listingId, reason } = await request.json();
         if (!listingId) return jsonResponse({ error: 'Missing listingId' }, 400, ALLOWED_ORIGIN);
@@ -463,19 +497,45 @@ Brew method: ${method}. Problem: ${issue}`;
         const raw = await env.FDC_STORE.get(`listing:${listingId}`);
         if (!raw) return jsonResponse({ error: 'Listing not found' }, 404, ALLOWED_ORIGIN);
         const record = JSON.parse(raw);
-        record.flagged = true;
-        record.flagReason = reason || 'No reason given';
-        await env.FDC_STORE.put(`listing:${listingId}`, JSON.stringify(record));
 
-        const deleteUrl = `${new URL(request.url).origin}/admin/delete?id=${listingId}&token=${env.ADMIN_TOKEN}`;
-        const restoreUrl = `${new URL(request.url).origin}/admin/restore?id=${listingId}&token=${env.ADMIN_TOKEN}`;
+        const reporter = await hashText(request.headers.get('CF-Connecting-IP') || 'unknown');
+        record.flagReports = Array.isArray(record.flagReports) ? record.flagReports : [];
+        if (record.flagReports.some(r => r.by === reporter)) {
+          return jsonResponse({ flagged: true }, 200, ALLOWED_ORIGIN); // same person reporting again — ignore quietly
+        }
+        record.flagReports.push({ by: reporter, reason: String(reason || 'No reason given').slice(0, 300), at: Date.now() });
+        const AUTO_HIDE_AT = 3;
+        const nowHidden = !record.flagged && record.flagReports.length >= AUTO_HIDE_AT;
+        if (nowHidden) record.flagged = true;
+        record.flagReason = record.flagReports[record.flagReports.length - 1].reason;
+        await putListing(env, record);
+
+        const origin = new URL(request.url).origin;
+        const hideUrl = `${origin}/admin/hide?id=${listingId}&token=${env.ADMIN_TOKEN}`;
+        const deleteUrl = `${origin}/admin/delete?id=${listingId}&token=${env.ADMIN_TOKEN}`;
+        const restoreUrl = `${origin}/admin/restore?id=${listingId}&token=${env.ADMIN_TOKEN}`;
+        const status = record.flagged
+          ? `It is now HIDDEN from the board${nowHidden ? ` (auto-hidden after ${AUTO_HIDE_AT} separate reports)` : ''}.`
+          : `It is still VISIBLE on the board (${record.flagReports.length} of ${AUTO_HIDE_AT} reports needed to auto-hide).`;
 
         await sendAlertEmail(env, {
-          subject: `[Dublin Coffee Jobs] Listing flagged — ${record.data?.title || record.data?.role || 'untitled'}`,
-          text: `A listing was reported and has been auto-hidden from the board.\n\nReason: ${record.flagReason}\n\nListing summary: ${JSON.stringify(record.data, null, 2)}\n\nPermanently delete: ${deleteUrl}\nRestore (false alarm): ${restoreUrl}`,
+          subject: `[Dublin Coffee Jobs] Listing reported (${record.flagReports.length}) — ${record.data?.title || record.data?.role || 'untitled'}`,
+          text: `A listing was reported. ${status}\n\nLatest reason: ${record.flagReason}\n\nAll reasons so far:\n${record.flagReports.map(r => '- ' + r.reason).join('\n')}\n\nListing summary: ${JSON.stringify(record.data, null, 2)}\n\nHide it now: ${hideUrl}\nPermanently delete: ${deleteUrl}\nRestore / clear reports (false alarm): ${restoreUrl}`,
         });
 
         return jsonResponse({ flagged: true }, 200, ALLOWED_ORIGIN);
+      }
+
+      if (path === '/admin/hide' && request.method === 'GET') {
+        const id = url.searchParams.get('id');
+        const token = url.searchParams.get('token');
+        if (token !== env.ADMIN_TOKEN) return new Response('Forbidden', { status: 403, headers: { 'Access-Control-Allow-Origin': ALLOWED_ORIGIN } });
+        const raw = await env.FDC_STORE.get(`listing:${id}`);
+        if (!raw) return new Response('Listing not found or already expired.', { status: 404, headers: { 'Access-Control-Allow-Origin': ALLOWED_ORIGIN } });
+        const record = JSON.parse(raw);
+        record.flagged = true;
+        await putListing(env, record);
+        return new Response('Listing hidden from the board. You can close this tab.', { status: 200, headers: { 'Access-Control-Allow-Origin': ALLOWED_ORIGIN } });
       }
 
       if (path === '/admin/delete' && request.method === 'GET') {
@@ -493,7 +553,8 @@ Brew method: ${method}. Problem: ${issue}`;
         if (raw) {
           const record = JSON.parse(raw);
           record.flagged = false;
-          await env.FDC_STORE.put(`listing:${id}`, JSON.stringify(record));
+          record.flagReports = [];
+          await putListing(env, record);
         }
         return new Response('Listing restored to the board. You can close this tab.', { status: 200, headers: { 'Access-Control-Allow-Origin': ALLOWED_ORIGIN } });
       }
@@ -576,10 +637,22 @@ Brew method: ${method}. Problem: ${issue}`;
       // instead. The candidate's own confirmation email is unaffected
       // either way — they always hear back immediately. ──
       if (path === '/apply' && request.method === 'POST') {
-        const { employerEmail, name, candidateEmail, role, about, cv, cvFileUrl, jobTitle, listingId } = await request.json();
-        if (!employerEmail || !name || !candidateEmail) {
+        const { name, candidateEmail, role, about, cv, cvFileUrl, listingId } = await request.json();
+        if (!listingId || !name || !candidateEmail) {
           return jsonResponse({ error: 'Missing required fields' }, 400, ALLOWED_ORIGIN);
         }
+        // Who the application goes to is decided HERE, from the listing
+        // itself — never from what the browser sends. Previously the browser
+        // supplied the employer's address, which meant anyone could use this
+        // endpoint to send email to any address from our domain.
+        const applyListingRaw = await env.FDC_STORE.get(`listing:${listingId}`);
+        if (!applyListingRaw) return jsonResponse({ error: 'That job has expired or been removed' }, 404, ALLOWED_ORIGIN);
+        const applyListing = JSON.parse(applyListingRaw);
+        if (applyListing.kind !== 'job' || applyListing.flagged || !applyListing.data || !applyListing.data.email) {
+          return jsonResponse({ error: 'That job is not accepting applications' }, 400, ALLOWED_ORIGIN);
+        }
+        const employerEmail = applyListing.data.email;
+        const jobTitle = applyListing.data.title || '';
 
         if (listingId) {
           const existing = await env.FDC_STORE.list({ prefix: `application:${listingId}:` });
@@ -598,15 +671,9 @@ Brew method: ${method}. Problem: ${issue}`;
         let skipScoring = false;
         let digestMode = false;
         let jobDesc = '';
-        if (listingId) {
-          const listingRaw = await env.FDC_STORE.get(`listing:${listingId}`);
-          if (listingRaw) {
-            const listing = JSON.parse(listingRaw);
-            skipScoring = !!listing.data.skipScoring;
-            digestMode = !!listing.data.digestMode;
-            jobDesc = listing.data.desc || '';
-          }
-        }
+        skipScoring = !!applyListing.data.skipScoring;
+        digestMode = !!applyListing.data.digestMode;
+        jobDesc = applyListing.data.desc || '';
 
         if (!skipScoring && cv && cv.length >= 50) {
           try {
@@ -838,6 +905,19 @@ Respond ONLY with JSON, no markdown: {"score":<0-100>,"highlights":["...","...",
   const data = await callClaude(prompt, env, 500);
   const text = data.content.map(i => i.text || '').join('');
   return JSON.parse(text.replace(/```json|```/g, '').trim());
+}
+
+// Saves a listing while keeping its original expiry. (Plain puts without
+// an expiry used to make a flagged/restored listing live forever.)
+async function putListing(env, record) {
+  const opts = {};
+  if (record.expiresAt) opts.expirationTtl = Math.max(60, Math.floor((record.expiresAt - Date.now()) / 1000));
+  await env.FDC_STORE.put(`listing:${record.id}`, JSON.stringify(record), opts);
+}
+
+async function hashText(text) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(text)));
+  return [...new Uint8Array(buf)].slice(0, 12).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
 function jsonResponse(data, status, origin) {
