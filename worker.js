@@ -1439,9 +1439,9 @@ async function sendAlertEmail(env, { subject, text }) {
 // ═══════════════════════════════════════════════════════════════════
 
 const DEFAULT_SCAN_EMPLOYERS = [
-  { name: 'Insomnia Coffee Company', type: 'Café chain', url: 'https://www.insomnia.ie/careers' },
+  { name: 'Insomnia Coffee Company', type: 'Café chain', url: '', formOnly: true },
   { name: 'EUROSPAR Prendergast Group', type: 'Retail coffee counters', url: 'https://eurosparcareers.recruitee.com' },
-  { name: 'Centra', type: 'Retail coffee counters', url: 'https://centra.ie/careers' },
+  { name: 'Centra', type: 'Retail coffee counters (each shop hires itself)', url: '', formOnly: true },
   // No confirmed careers page yet — the discovery step looks for one.
   ...['BaxterStorey', 'Compass Group Ireland (Gather & Gather)', 'CH&CO', 'Aramark Ireland', 'Sodexo Ireland',
     'Costa Coffee Ireland', 'Eclective Hospitality Group', 'Coffeeangel', 'Java Republic', "Brady's Coffee",
@@ -1491,6 +1491,8 @@ async function getScanEmployers(env) {
   const list = raw ? JSON.parse(raw) : [];
   // Anything added to the built-in list later is merged in by name, so
   // new names reach the live list without losing what discovery found.
+  // Employers confirmed (02/11/26) to advertise only on job sites, not their own:
+  for (const e of list) if (['insomnia coffee company', 'centra'].includes(e.name.toLowerCase()) && e.url && !e.atsChecked) { e.url = ''; e.formOnly = true; }
   const have = new Set(list.map(e => e.name.toLowerCase()));
   for (const e of DEFAULT_SCAN_EMPLOYERS) if (!have.has(e.name.toLowerCase())) list.push({ ...e });
   return list;
@@ -1569,25 +1571,25 @@ async function runJobScan(env, listings, now = new Date()) {
 async function scanEmployer(emp, env) {
   const pageUrl = cleanUrl(emp.url);
   if (!pageUrl) return [];
-  const host = new URL(pageUrl).hostname;
   let text = '', links = [];
 
-  if (/\.recruitee\.com$/i.test(host)) {
-    // Recruitee publishes a tidy feed of every opening.
-    const res = await fetch(`https://${host}/api/offers/`, { headers: { 'Accept': 'application/json' } });
-    if (!res.ok) throw new Error('Recruitee feed ' + res.status);
-    const feed = await res.json();
-    const offers = (feed.offers || []).slice(0, 60).map(o => ({
-      title: o.title, location: [o.city, o.country].filter(Boolean).join(', '),
-      type: o.employment_type_code || '', link: o.careers_url || o.careers_apply_url || '',
-      about: String(o.description || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 300),
-    }));
+  // Many employers run their jobs through a hiring platform, often loaded
+  // into their careers page after it opens. We spot the platform (from the
+  // link itself or from the page's code) and read its public job feed.
+  let ats = detectAts(pageUrl, '');
+  let html = '';
+  if (!ats) {
+    const res = await fetch(pageUrl, { headers: { 'User-Agent': 'DublinCoffeeJobsBot/1.0 (+https://dublincoffeejobs.com)', 'Accept': 'text/html' } });
+    if (!res.ok) throw new Error('Page ' + res.status);
+    html = (await res.text()).slice(0, 250000);
+    ats = detectAts(pageUrl, html);
+  }
+
+  if (ats) {
+    const offers = (await fetchAtsOffers(ats)).slice(0, 60);
     text = JSON.stringify(offers);
     links = offers.map(o => ({ text: o.title, href: cleanUrl(o.link) })).filter(l => l.href);
   } else {
-    const res = await fetch(pageUrl, { headers: { 'User-Agent': 'DublinCoffeeJobsBot/1.0 (+https://dublincoffeejobs.com)', 'Accept': 'text/html' } });
-    if (!res.ok) throw new Error('Page ' + res.status);
-    const html = (await res.text()).slice(0, 250000);
     const seen = new Set();
     for (const m of html.matchAll(/<a\b[^>]*href\s*=\s*["']([^"'#]+)["'][^>]*>([\s\S]*?)<\/a>/gi)) {
       let href; try { href = cleanUrl(new URL(m[1], pageUrl).href); } catch { continue; }
@@ -1665,7 +1667,7 @@ async function discoverEmployers(env) {
   const prompt = `You are building a list of employers for a coffee and hospitality jobs board in Ireland.
 Task 1: find the employer's OWN careers or jobs page for each of these: ${missing.length ? missing.join('; ') : '(none)'}. It must be a page that lists individual open roles (on their own site or their own hiring platform). If they only have a general "send us your CV" form, include them with "formOnly": true.
 Task 2: find up to 10 MORE employers based in Ireland that hire baristas, café, coffee or hospitality staff AND have their own careers page: specialty coffee roasters, café groups, bakery-café chains, hotel groups, contract caterers. Do not repeat any of these: ${known.join('; ')}.
-Only use the employer's own website or their own hiring page (for example on Workable, Teamtailor, Recruitee, Harri, BambooHR). Never use Indeed, LinkedIn, Jobs.ie, IrishJobs, JobsIreland, Glassdoor or recruitment agencies.
+Only use the employer's own website or their own hiring page. Hiring platform pages are best (Workable, Recruitee, Greenhouse, Lever, BambooHR, SmartRecruiters, Personio, Teamtailor): if the careers page sends people to one, give that platform link. Never use Indeed, LinkedIn, Jobs.ie, IrishJobs, JobsIreland, Glassdoor or recruitment agencies.
 When finished, reply with ONLY a JSON array, no other text: [{"name": "...", "type": "short description", "url": "https://...", "formOnly": false}], including Task 1 results under their exact names above. Leave out any employer whose careers page you could not find.`;
 
   const found = await callClaudeWithSearch(prompt, env);
@@ -2161,4 +2163,83 @@ async function runSpottedLinkCheck(env, listings, now = Date.now()) {
     }
   }
   if (removed.length) console.log('Removed filled roles:', removed.join('; '));
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// HIRING PLATFORMS — public job feeds. Each returns a tidy list of
+// { title, location, type, link, about } for the AI to filter.
+// ═══════════════════════════════════════════════════════════════════
+const ATS_PATTERNS = [
+  ['recruitee', /https?:\/\/([a-z0-9-]+)\.recruitee\.com/i],
+  ['workable', /https?:\/\/apply\.workable\.com\/api\/v\d\/widget\/accounts\/([a-z0-9-]+)/i],
+  ['workable', /https?:\/\/apply\.workable\.com\/([a-z0-9-]+)/i],
+  ['workable', /https?:\/\/([a-z0-9-]+)\.workable\.com/i],
+  ['greenhouse', /https?:\/\/(?:boards|job-boards)(?:\.eu)?\.greenhouse\.io\/(?:embed\/job_board\?for=)?([a-z0-9_-]+)/i],
+  ['lever', /https?:\/\/jobs\.(?:eu\.)?lever\.co\/([a-z0-9_.-]+)/i],
+  ['bamboohr', /https?:\/\/([a-z0-9-]+)\.bamboohr\.com/i],
+  ['smartrecruiters', /https?:\/\/(?:jobs|careers)\.smartrecruiters\.com\/([a-z0-9_-]+)/i],
+  ['personio', /https?:\/\/([a-z0-9-]+)\.jobs\.personio\.(?:de|com)/i],
+];
+const ATS_SKIP = new Set(['www', 'api', 'apply', 'app', 'help', 'jobs', 'careers', 'embed', 'static', 'assets']);
+
+function detectAts(pageUrl, html) {
+  for (const src of [pageUrl, html]) {
+    if (!src) continue;
+    for (const [kind, re] of ATS_PATTERNS) {
+      for (const m of String(src).matchAll(new RegExp(re.source, 'gi'))) {
+        if (m[1] && !ATS_SKIP.has(m[1].toLowerCase())) return { kind, id: m[1].replace(/\.$/, '') };
+      }
+    }
+  }
+  return null;
+}
+
+async function fetchAtsOffers({ kind, id }) {
+  const getJson = async u => {
+    const r = await fetch(u, { headers: { 'Accept': 'application/json', 'User-Agent': 'DublinCoffeeJobsBot/1.0 (+https://dublincoffeejobs.com)' } });
+    if (!r.ok) throw new Error(`${kind} feed ${r.status}`);
+    return r.json();
+  };
+  const strip = h => String(h || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 300);
+  const join = (...a) => a.filter(Boolean).join(', ');
+  switch (kind) {
+    case 'recruitee': {
+      const f = await getJson(`https://${id}.recruitee.com/api/offers/`);
+      return (f.offers || []).map(o => ({ title: o.title, location: join(o.city, o.country), type: o.employment_type_code || '',
+        link: o.careers_url || o.careers_apply_url || '', about: strip(o.description) }));
+    }
+    case 'workable': {
+      const f = await getJson(`https://apply.workable.com/api/v1/widget/accounts/${id}`);
+      return (f.jobs || []).map(j => ({ title: j.title, location: join(j.city, j.state, j.country), type: j.employment_type || '',
+        link: j.url || j.shortlink || (j.shortcode ? `https://apply.workable.com/${id}/j/${j.shortcode}/` : ''), about: strip(j.description) }));
+    }
+    case 'greenhouse': {
+      const f = await getJson(`https://boards-api.greenhouse.io/v1/boards/${id}/jobs`);
+      return (f.jobs || []).map(j => ({ title: j.title, location: (j.location && j.location.name) || '', type: '', link: j.absolute_url || '', about: '' }));
+    }
+    case 'lever': {
+      const f = await getJson(`https://api.lever.co/v0/postings/${id}?mode=json`);
+      return (Array.isArray(f) ? f : []).map(j => ({ title: j.text, location: (j.categories && j.categories.location) || '',
+        type: (j.categories && j.categories.commitment) || '', link: j.hostedUrl || '', about: strip(j.descriptionPlain || j.description) }));
+    }
+    case 'bamboohr': {
+      const f = await getJson(`https://${id}.bamboohr.com/careers/list`);
+      return (f.result || []).map(j => ({ title: j.jobOpeningName, location: join(j.location && j.location.city, j.location && j.location.state),
+        type: j.employmentStatusLabel || '', link: `https://${id}.bamboohr.com/careers/${j.id}`, about: '' }));
+    }
+    case 'smartrecruiters': {
+      const f = await getJson(`https://api.smartrecruiters.com/v1/companies/${id}/postings?limit=100`);
+      return (f.content || []).map(j => ({ title: j.name, location: join(j.location && j.location.city, j.location && j.location.country),
+        type: (j.typeOfEmployment && j.typeOfEmployment.label) || '', link: `https://jobs.smartrecruiters.com/${id}/${j.id}`, about: '' }));
+    }
+    case 'personio': {
+      const r = await fetch(`https://${id}.jobs.personio.de/xml`);
+      if (!r.ok) throw new Error('personio feed ' + r.status);
+      const xml = await r.text();
+      const tag = (blk, t) => ((blk.match(new RegExp(`<${t}>([\\s\\S]*?)</${t}>`)) || [])[1] || '').replace(/<!\[CDATA\[|\]\]>/g, '').trim();
+      return [...xml.matchAll(/<position>([\s\S]*?)<\/position>/g)].map(m => ({ title: tag(m[1], 'name'), location: tag(m[1], 'office'),
+        type: tag(m[1], 'schedule'), link: `https://${id}.jobs.personio.de/job/${tag(m[1], 'id')}`, about: '' }));
+    }
+  }
+  return [];
 }
