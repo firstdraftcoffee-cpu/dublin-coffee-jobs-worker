@@ -1724,7 +1724,7 @@ async function sendScanEmail(state, env) {
   if (leads.length) {
     lines.push('— — —', '',
       `EMPLOYERS TO INVITE: ${leads.length} hiring elsewhere, not on DCJ yet.`,
-      'Tap "Send invite" and they get a short email from Dublin Coffee Jobs offering a free listing. If they tap yes, their job goes live by itself. Replies come to you.', '');
+      'Tap "Send invite" and they get a short email from Dublin Coffee Jobs (not signed with your name) offering a free listing. If they tap yes, their job goes live by itself. Replies come to you.', '');
     leads.forEach((l, i) => {
       lines.push(`${i + 1}. ${l.employer} — ${l.role}${l.location ? ', ' + l.location : ''}`,
         `   Email: ${l.email}${l.website ? ' · ' + l.website : ''}`,
@@ -1893,7 +1893,7 @@ function inviteEmailText(lead, inv, env) {
   const base = env.WORKER_URL || 'https://cv-review.firstdraftcoffee.workers.dev';
   return `Hi ${lead.employer} team,
 
-I noticed you're hiring a ${lead.role}${lead.location ? ' in ' + lead.location : ''}. I run Dublin Coffee Jobs, Ireland's coffee and hospitality jobs community: 23,000 followers, 10 years running.
+We noticed you're hiring a ${lead.role}${lead.location ? ' in ' + lead.location : ''}. Dublin Coffee Jobs is Ireland's coffee and hospitality jobs community: 23,000 followers, 10 years running.
 
 Listing is free until the new year. If you'd like your role on it, tap below. The details are already filled in, so it takes about a minute:
 ${base}/invite/yes?id=${inv.id}&t=${inv.token}
@@ -1902,7 +1902,7 @@ It goes live straight away and gets shared on our Instagram and Facebook. Applic
 
 If not, no worries, you won't hear from us again about this role.
 
-Ger O'Donohoe
+Thanks!
 Dublin Coffee Jobs · ${env.SITE_URL || 'https://dublincoffeejobs.com'}
 
 Don't want any emails from us? ${base}/invite/stop?id=${inv.id}&t=${inv.token}`;
