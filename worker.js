@@ -904,6 +904,8 @@ Brew method: ${method}. Problem: ${issue}`;
 
     // Monday jobs scan — does a small slice each hour (see runJobScan).
     try { await runJobScan(env, listings); } catch (e) { console.error('Job scan error:', String(e)); }
+    try { await runSocialQueue(env, ctx); } catch (e) { console.error('Social queue error:', String(e)); }
+    try { await runSpottedLinkCheck(env, listings); } catch (e) { console.error('Link check error:', String(e)); }
   }
 };
 
@@ -1627,7 +1629,7 @@ async function saveDraftIfNew(role, emp, listings, state, env) {
   if (alreadyLive) return null;
 
   const id = crypto.randomUUID();
-  const draft = { id, token: randomToken(), week: state.week, allToken: state.allToken, employer: emp.name, ...role, createdAt: Date.now() };
+  const draft = { id, token: randomToken(), week: state.week, allToken: state.allToken, employer: emp.name, sourceUrl: cleanUrl(emp.url), ...role, createdAt: Date.now() };
   await env.FDC_STORE.put(`scan:draft:${id}`, JSON.stringify(draft), { expirationTtl: 60 * 60 * 24 * 14 });
   await env.FDC_STORE.put(seenKey, '1', { expirationTtl: 60 * 60 * 24 * 45 });
   return id;
@@ -1748,15 +1750,14 @@ async function publishDraft(draft, env, ctx) {
     expiresAt: Date.now() + ttl * 1000, flagged: false, spotted: true,
     data: {
       title: draft.title, venue: draft.employer, location: draft.location,
-      salary: draft.salary || 'See their site', type: draft.type || '',
-      desc: `${draft.summary ? draft.summary + '\n\n' : ''}Spotted on ${draft.employer}'s own careers page — apply directly on their website.`,
-      applyUrl: draft.applyUrl, skipScoring: true,
+      salary: draft.salary || '', payOnSite: !draft.salary, type: draft.type || '',
+      desc: draft.summary || '',   // the board shows a "Spotted on their careers page" note itself
+      applyUrl: draft.applyUrl, sourceUrl: draft.sourceUrl || draft.applyUrl, skipScoring: true,
     },
   };
   await env.FDC_STORE.put(`listing:${id}`, JSON.stringify(record), { expirationTtl: ttl });
   await env.FDC_STORE.delete(`scan:draft:${draft.id}`);
-  ctx.waitUntil(postToSocial(record, env));
-  ctx.waitUntil(notifyGroupPost(record, env));
+  await queueSocial(record, env);
   return record;
 }
 
@@ -1805,7 +1806,7 @@ async function handleScanRoute(path, request, url, env, ctx) {
     const d = await loadDraft(form.get('id'), form.get('t'));
     if (!d) return gone();
     const rec = await publishDraft(d, env, ctx);
-    return scanPage('Posted', esc => `<h1>Posted ✓</h1><p><strong>${esc(d.title)}</strong> at ${esc(d.employer)} is live and going out on Instagram and Facebook.</p><p><a href="${site}/job-board.html?id=${esc(rec.id)}">See it on the board</a></p>`);
+    return scanPage('Posted', esc => `<h1>Posted ✓</h1><p><strong>${esc(d.title)}</strong> at ${esc(d.employer)} is live on the board. Its Instagram and Facebook post goes out within the hour.</p><p><a href="${site}/job-board.html?id=${esc(rec.id)}">See it on the board</a></p>`);
   }
   if (path === '/scan/review-all' && request.method === 'GET') {
     const w = url.searchParams.get('w'), t = url.searchParams.get('t');
@@ -1819,7 +1820,7 @@ async function handleScanRoute(path, request, url, env, ctx) {
     const list = await loadWeek(form.get('w'), form.get('t'));
     if (!list || !list.length) return gone();
     for (const d of list) await publishDraft(d, env, ctx);
-    return scanPage('Posted', () => `<h1>Posted ✓</h1><p>${list.length} jobs are live and going out on Instagram and Facebook.</p><p><a href="${site}/job-board.html">Open the job board</a></p>`);
+    return scanPage('Posted', () => `<h1>Posted ✓</h1><p>${list.length} jobs are live on the board. Their Instagram and Facebook posts go out one an hour (daytime only) so your followers' feeds don't get flooded.</p><p><a href="${site}/job-board.html">Open the job board</a></p>`);
   }
   return handleInviteRoute(path, request, url, env, ctx);
 }
@@ -2059,4 +2060,76 @@ async function handleInviteRoute(path, request, url, env, ctx) {
     return scanPage('Unsubscribed', () => `<h1>Done</h1><p>You won't get any more emails from Dublin Coffee Jobs. Sorry for the bother.</p>`);
   }
   return null;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SOCIAL QUEUE — scanned jobs Ger approves go on the board at once, but
+// their Instagram/Facebook posts (and the Group paste note) go out one
+// per hour, 8am–9pm Dublin time, so "Post all" doesn't flood the feed.
+// KV: socialq:<time>-<listingId> (30 days), social:lastQueuedPost.
+// ═══════════════════════════════════════════════════════════════════
+const SOCIAL_GAP_MS = 55 * 60 * 1000;
+
+async function queueSocial(record, env) {
+  await env.FDC_STORE.put(`socialq:${String(Date.now()).padStart(15, '0')}-${record.id}`, record.id, { expirationTtl: 60 * 60 * 24 * 30 });
+}
+
+async function runSocialQueue(env, ctx, now = new Date()) {
+  const t = dublinNow(now);
+  if (t.hour < 8 || t.hour >= 21) return;
+  const last = parseInt((await env.FDC_STORE.get('social:lastQueuedPost')) || '0', 10);
+  if (now.getTime() - last < SOCIAL_GAP_MS) return;
+  const q = await env.FDC_STORE.list({ prefix: 'socialq:' });
+  const keys = q.keys.map(k => k.name).sort();
+  for (const key of keys) {
+    const id = await env.FDC_STORE.get(key);
+    await env.FDC_STORE.delete(key);
+    const raw = id ? await env.FDC_STORE.get(`listing:${id}`) : null;
+    if (!raw) continue;                       // removed or expired meanwhile — skip to the next
+    const record = JSON.parse(raw);
+    if (record.flagged) continue;
+    await env.FDC_STORE.put('social:lastQueuedPost', String(now.getTime()));
+    await postToSocial(record, env);
+    await notifyGroupPost(record, env);
+    return;                                   // one per run
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// FILLED-ROLE CHECK — once a day, re-check scanned jobs. If the
+// employer's job link is gone (404/410), or the job title has vanished
+// from their careers page two days running, the listing comes down so
+// nobody clicks through to a dead job. Site errors are ignored.
+// KV: linkcheck:lastRun, linkcheck:miss:<listingId>.
+// ═══════════════════════════════════════════════════════════════════
+async function runSpottedLinkCheck(env, listings, now = Date.now()) {
+  const last = parseInt((await env.FDC_STORE.get('linkcheck:lastRun')) || '0', 10);
+  if (now - last < 23 * 60 * 60 * 1000) return;
+  await env.FDC_STORE.put('linkcheck:lastRun', String(now));
+  const spotted = listings.filter(l => l.spotted && !l.flagged && l.data && l.data.applyUrl).slice(0, 20);
+  const norm = s => String(s || '').toLowerCase().replace(/&amp;/g, '&').replace(/[^a-z0-9]+/g, ' ').trim();
+  const removed = [];
+  for (const l of spotted) {
+    let gone = false;
+    try {
+      const res = await fetch(l.data.applyUrl, { headers: { 'User-Agent': 'DublinCoffeeJobsBot/1.0 (+https://dublincoffeejobs.com)', 'Accept': 'text/html' }, redirect: 'follow' });
+      if (res.status === 404 || res.status === 410) gone = true;
+      else if (res.ok && l.data.applyUrl === l.data.sourceUrl) {
+        // Link is the general careers page, so check the job is still listed on it.
+        const text = norm((await res.text()).slice(0, 250000).replace(/<[^>]+>/g, ' '));
+        if (!text.includes(norm(l.data.title))) {
+          const missKey = `linkcheck:miss:${l.id}`;
+          if (await env.FDC_STORE.get(missKey)) gone = true;
+          else await env.FDC_STORE.put(missKey, '1', { expirationTtl: 60 * 60 * 24 * 3 });
+        } else {
+          await env.FDC_STORE.delete(`linkcheck:miss:${l.id}`);
+        }
+      }
+    } catch (e) { /* site down or slow — try again tomorrow */ }
+    if (gone) {
+      await env.FDC_STORE.delete(`listing:${l.id}`);
+      removed.push(`${l.data.title} — ${l.data.venue}`);
+    }
+  }
+  if (removed.length) console.log('Removed filled roles:', removed.join('; '));
 }
