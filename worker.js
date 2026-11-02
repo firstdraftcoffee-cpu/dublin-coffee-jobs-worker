@@ -1724,7 +1724,7 @@ async function sendScanEmail(state, env) {
   if (leads.length) {
     lines.push('— — —', '',
       `EMPLOYERS TO INVITE: ${leads.length} hiring elsewhere, not on DCJ yet.`,
-      'Tap "Send invite" and they get a short email from Dublin Coffee Jobs (not signed with your name) offering a free listing. If they tap yes, their job goes live by itself. Replies come to you.', '');
+      'Tap "Send invite" and they get a short email from Dublin Coffee Jobs offering a free listing. If they tap yes, their job goes live by itself. Replies go to ' + (env.INVITE_REPLY_TO || env.ALERT_EMAIL_TO) + '.', '');
     leads.forEach((l, i) => {
       lines.push(`${i + 1}. ${l.employer} — ${l.role}${l.location ? ', ' + l.location : ''}`,
         `   Email: ${l.email}${l.website ? ' · ' + l.website : ''}`,
@@ -1921,7 +1921,7 @@ async function sendInvite(lead, env) {
   await env.FDC_STORE.put(`invite:stop:${inv.id}`, JSON.stringify({ token: inv.token, email: lead.email }), { expirationTtl: 60 * 60 * 24 * 365 });
   await env.FDC_STORE.delete(`scan:lead:${lead.id}`);
   await sendEmailTo(env, lead.email, `Your ${lead.role} vacancy: free listing on Dublin Coffee Jobs?`,
-    inviteEmailText(lead, inv, env), env.ALERT_EMAIL_TO);
+    inviteEmailText(lead, inv, env), env.INVITE_REPLY_TO || env.ALERT_EMAIL_TO);
   return true;
 }
 
