@@ -1447,6 +1447,19 @@ const DEFAULT_SCAN_EMPLOYERS = [
     'Costa Coffee Ireland', 'Eclective Hospitality Group', 'Coffeeangel', 'Java Republic', "Brady's Coffee",
     'Velo Coffee Roasters', 'Flat Coffee', 'Imbibe Coffee Roasters', 'Soma Coffee Company']
     .map(name => ({ name, type: '', url: '' })),
+  // Added 02/11/26 — Irish coffee chains and well-known independents.
+  // Discovery checks each for a careers page that lists actual jobs; any
+  // that only have a general "send your CV" form go on the invite
+  // watch list instead (see findInviteLeads).
+  ...['Póg', 'Esquires Coffee Ireland', 'Twobeans Speciality Coffee Bar (Dún Laoghaire)', "Bewley's Ireland",
+    'Butlers Chocolate Café', 'Caffè Nero Ireland', 'Starbucks Ireland', "Gloria Jean's Coffees Ireland", 'AMT Coffee Ireland',
+    'Joe & The Juice Ireland', '3fe Coffee', 'Two Boys Brew', 'Brother Hubbard', 'Bread 41', 'Shoe Lane Coffee',
+    'Proper Order Coffee Co.', 'Kaph', 'Clement & Pekoe', 'Cloud Picker Coffee', 'Roasted Brown', 'Bear Market Coffee',
+    'Vice Coffee Inc.', 'Network Café Dublin', 'Two Pups Coffee', 'Badger & Dodo (Cork)', 'Filter Espresso & Coffee Brewing Specialists (Cork)',
+    'Golden Bean Coffee (Kerry)', 'Coffeewerk + Press (Galway)']
+    .map(name => ({ name, type: 'Coffee', url: '' })),
+  { name: 'Griolladh', type: 'Toastie & coffee chain', url: '', formOnly: true },
+  { name: 'Café Sol', type: 'Coffee shops & Dunnes kiosks', url: '', formOnly: true },
 ];
 const SCAN_START_HOUR = 1;
 const SCAN_EMAIL_HOUR = 8;
@@ -1475,7 +1488,12 @@ function cleanUrl(u) {
 
 async function getScanEmployers(env) {
   const raw = await env.FDC_STORE.get('scan:employers');
-  return raw ? JSON.parse(raw) : DEFAULT_SCAN_EMPLOYERS.map(e => ({ ...e }));
+  const list = raw ? JSON.parse(raw) : [];
+  // Anything added to the built-in list later is merged in by name, so
+  // new names reach the live list without losing what discovery found.
+  const have = new Set(list.map(e => e.name.toLowerCase()));
+  for (const e of DEFAULT_SCAN_EMPLOYERS) if (!have.has(e.name.toLowerCase())) list.push({ ...e });
+  return list;
 }
 
 // Called on every cron run; does nothing outside Monday's window.
@@ -1639,13 +1657,16 @@ async function saveDraftIfNew(role, emp, listings, state, env) {
 // on the list that don't have one yet and (2) add up to 10 new ones.
 async function discoverEmployers(env) {
   const employers = await getScanEmployers(env);
-  const missing = employers.filter(e => !e.url).map(e => e.name);
+  // Up to 10 unconfirmed employers per week, each tried at most 3 times.
+  const toCheck = employers.filter(e => !e.url && !e.formOnly && (e.tries || 0) < 3).slice(0, 10);
+  toCheck.forEach(e => { e.tries = (e.tries || 0) + 1; });
+  const missing = toCheck.map(e => e.name);
   const known = employers.map(e => e.name);
   const prompt = `You are building a list of employers for a coffee and hospitality jobs board in Ireland.
-Task 1: find the employer's OWN careers or jobs page for each of these: ${missing.length ? missing.join('; ') : '(none)'}.
+Task 1: find the employer's OWN careers or jobs page for each of these: ${missing.length ? missing.join('; ') : '(none)'}. It must be a page that lists individual open roles (on their own site or their own hiring platform). If they only have a general "send us your CV" form, include them with "formOnly": true.
 Task 2: find up to 10 MORE employers based in Ireland that hire baristas, café, coffee or hospitality staff AND have their own careers page: specialty coffee roasters, café groups, bakery-café chains, hotel groups, contract caterers. Do not repeat any of these: ${known.join('; ')}.
 Only use the employer's own website or their own hiring page (for example on Workable, Teamtailor, Recruitee, Harri, BambooHR). Never use Indeed, LinkedIn, Jobs.ie, IrishJobs, JobsIreland, Glassdoor or recruitment agencies.
-When finished, reply with ONLY a JSON array, no other text: [{"name": "...", "type": "short description", "url": "https://..."}], including Task 1 results under their exact names above. Leave out any employer whose careers page you could not find.`;
+When finished, reply with ONLY a JSON array, no other text: [{"name": "...", "type": "short description", "url": "https://...", "formOnly": false}], including Task 1 results under their exact names above. Leave out any employer whose careers page you could not find.`;
 
   const found = await callClaudeWithSearch(prompt, env);
   const start = found.indexOf('['), end = found.lastIndexOf(']');
@@ -1658,10 +1679,16 @@ When finished, reply with ONLY a JSON array, no other text: [{"name": "...", "ty
   for (const it of (Array.isArray(items) ? items : []).slice(0, 25)) {
     const url = cleanUrl(it && it.url);
     const name = String((it && it.name) || '').trim().slice(0, 80);
-    if (!url || !name) continue;
+    if (!name) continue;
+    const existing = byName.get(name.toLowerCase());
+    if (existing && !existing.url && it.formOnly === true) {
+      existing.formOnly = true;              // no job list to scan — watch for them in invites instead
+      added.push(`${name} (no job list on their site, so watching for them in invites)`);
+      continue;
+    }
+    if (!url || it.formOnly === true) continue;
     const host = new URL(url).hostname;
     if (BLOCKED_JOB_SITES.test(host)) continue;
-    const existing = byName.get(name.toLowerCase());
     if (existing) {
       if (!existing.url) { existing.url = url; added.push(`${name} (careers page found)`); hosts.add(host); }
       continue;
@@ -1684,7 +1711,7 @@ async function callClaudeWithSearch(prompt, env) {
       headers: { 'Content-Type': 'application/json', 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({
         model: 'claude-sonnet-5', max_tokens: 4000, messages,
-        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 8,
+        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 12,
           user_location: { type: 'approximate', country: 'IE', city: 'Dublin', timezone: 'Europe/Dublin' } }],
       }),
     });
@@ -1857,10 +1884,12 @@ async function findInviteLeads(env, listings, state) {
   const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
   const onBoard = new Set(listings.filter(l => l.kind === 'job').map(l => norm(l.data && l.data.venue)));
   const scanned = employers.filter(e => e.url).map(e => e.name);
+  const watch = employers.filter(e => !e.url).map(e => e.name);
   const prompt = `You are helping Dublin Coffee Jobs, a free Irish coffee and hospitality jobs board, invite employers to list their vacancies.
 Find up to ${MAX_LEADS} employers in Ireland that are hiring RIGHT NOW (ads from the last 3 weeks) for coffee, café, bakery, restaurant, bar or hotel front-line roles — barista, café staff, supervisor or manager, chef, waiting staff, bartender and similar. Favour independent cafés, coffee roasters, bakeries and small groups.
 You may use job sites such as Indeed, IrishJobs, Jobs.ie or LinkedIn ONLY to see who is hiring and for what role. Do not copy anything else from them.
 For each employer, find a GENERAL contact email published on the employer's OWN website (e.g. info@, hello@, jobs@, careers@). Never use a named person's email address, and never guess an address. Skip the employer if you can't find one.
+Check these first, and include any that are hiring now: ${watch.join('; ')}.
 Skip recruitment agencies and these employers: ${scanned.join('; ')}.
 Reply with ONLY a JSON array, no other text: [{"employer": "...", "role": "job title", "location": "town or county", "email": "...", "website": "https://their own site"}]`;
   const reply = await callClaudeWithSearch(prompt, env);
