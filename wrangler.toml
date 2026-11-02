@@ -5,7 +5,7 @@ compatibility_date = "2026-07-25"
 [vars]
 SITE_URL = "https://dublincoffeejobs.com"
 # Where the Monday jobs email, Group paste notes and flag alerts go.
-ALERT_EMAIL_TO = "coffeeger@gmail.com"
+ALERT_EMAIL_TO = "firstdraftcoffee@gmail.com"
 WORKER_URL = "https://cv-review.firstdraftcoffee.workers.dev"
 # Where employers' replies to free-listing invites go.
 INVITE_REPLY_TO = "firstdraftcoffee@gmail.com"
