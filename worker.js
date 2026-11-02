@@ -91,7 +91,7 @@ export default {
     }
 
     try {
-      if (path.startsWith('/scan/')) {
+      if (path.startsWith('/scan/') || path.startsWith('/invite/')) {
         const scanResponse = await handleScanRoute(path, request, url, env, ctx);
         if (scanResponse) return scanResponse;
       }
@@ -1485,7 +1485,7 @@ async function runJobScan(env, listings, now = new Date()) {
   const stateRaw = await env.FDC_STORE.get('scan:state');
   let state = stateRaw ? JSON.parse(stateRaw) : null;
   if (!state || state.week !== t.date) {
-    state = { week: t.date, phase: 'scan', cursor: 0, drafts: [], allToken: randomToken(), notes: [], addedEmployers: [] };
+    state = { week: t.date, phase: 'scan', cursor: 0, drafts: [], allToken: randomToken(), notes: [], addedEmployers: [], leads: [] };
   }
   const save = () => env.FDC_STORE.put('scan:state', JSON.stringify(state), { expirationTtl: 60 * 60 * 24 * 14 });
 
@@ -1520,6 +1520,18 @@ async function runJobScan(env, listings, now = new Date()) {
     } catch (e) {
       console.error('Employer discovery failed:', String(e));
       state.notes.push("Couldn't search for new employers this week.");
+    }
+    state.phase = isFreeLaunch(env) ? 'leads' : 'ready';
+    await save();
+    return;
+  }
+
+  if (state.phase === 'leads') {
+    try {
+      state.leads = await findInviteLeads(env, listings, state);
+    } catch (e) {
+      console.error('Invite lead search failed:', String(e));
+      state.notes.push("Couldn't look for employers to invite this week.");
     }
     state.phase = 'ready';
     await save();
@@ -1704,6 +1716,22 @@ async function sendScanEmail(state, env) {
   } else {
     lines.push('No new roles on the watched careers pages this week.', '');
   }
+  const leads = [];
+  for (const id of (state.leads || [])) {
+    const raw = await env.FDC_STORE.get(`scan:lead:${id}`);
+    if (raw) leads.push(JSON.parse(raw));
+  }
+  if (leads.length) {
+    lines.push('— — —', '',
+      `EMPLOYERS TO INVITE: ${leads.length} hiring elsewhere, not on DCJ yet.`,
+      'Tap "Send invite" and they get a short email from Dublin Coffee Jobs offering a free listing. If they tap yes, their job goes live by itself. Replies come to you.', '');
+    leads.forEach((l, i) => {
+      lines.push(`${i + 1}. ${l.employer} — ${l.role}${l.location ? ', ' + l.location : ''}`,
+        `   Email: ${l.email}${l.website ? ' · ' + l.website : ''}`,
+        `   Send invite: ${base}/scan/invite?id=${l.id}&t=${l.token}`, '');
+    });
+    lines.push(`Invite all ${leads.length}: ${base}/scan/invite-all?w=${state.week}&t=${state.allToken}`, '');
+  }
   if (state.addedEmployers.length) lines.push(`Added to next week's scan: ${state.addedEmployers.join(', ')}.`, '');
   if (state.notes.length) lines.push(...state.notes, '');
   lines.push('Links work for 14 days.');
@@ -1792,6 +1820,243 @@ async function handleScanRoute(path, request, url, env, ctx) {
     if (!list || !list.length) return gone();
     for (const d of list) await publishDraft(d, env, ctx);
     return scanPage('Posted', () => `<h1>Posted ✓</h1><p>${list.length} jobs are live and going out on Instagram and Facebook.</p><p><a href="${site}/job-board.html">Open the job board</a></p>`);
+  }
+  return handleInviteRoute(path, request, url, env, ctx);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// EMPLOYER INVITES — employers hiring on Indeed etc. but not on DCJ.
+// We only use job sites to learn WHO is hiring. Nothing is copied from
+// them: the employer gets one polite email (only after Ger taps "Send
+// invite"), and their job only goes up if THEY tap yes and confirm the
+// details themselves. Every email has a "never email me again" link.
+// KV: scan:lead:<id> (14 days), invite:<id> (30 days),
+// invite:sent:<email> (90 days, no repeat invites), invite:optout:<email
+// or @domain> (forever).
+// ═══════════════════════════════════════════════════════════════════
+
+const GENERIC_INBOX = /^(info|hello|hi|jobs|job|careers|career|recruitment|recruit|recruiting|hr|people|work|team|contact|enquiries|enquiry|hiring|admin|office|cafe|coffee|bookings|reservations|manager|management|general|mail)([.\-_]?[a-z0-9]*)?$/i;
+const MAX_LEADS = 15;
+
+function validInviteEmail(e) {
+  const email = String(e || '').trim().toLowerCase();
+  if (!/^[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}$/.test(email) || email.length > 120) return '';
+  // Only shared business inboxes — never a named person's address.
+  return GENERIC_INBOX.test(email.split('@')[0]) ? email : '';
+}
+
+async function isOptedOut(email, env) {
+  const domain = '@' + email.split('@')[1];
+  return !!(await env.FDC_STORE.get(`invite:optout:${email}`)) ||
+    (!/@(gmail|yahoo|hotmail|outlook|icloud|live|eircom)\./.test(domain) && !!(await env.FDC_STORE.get(`invite:optout:${domain}`)));
+}
+
+async function findInviteLeads(env, listings, state) {
+  const employers = await getScanEmployers(env);
+  const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const onBoard = new Set(listings.filter(l => l.kind === 'job').map(l => norm(l.data && l.data.venue)));
+  const scanned = employers.filter(e => e.url).map(e => e.name);
+  const prompt = `You are helping Dublin Coffee Jobs, a free Irish coffee and hospitality jobs board, invite employers to list their vacancies.
+Find up to ${MAX_LEADS} employers in Ireland that are hiring RIGHT NOW (ads from the last 3 weeks) for coffee, café, bakery, restaurant, bar or hotel front-line roles — barista, café staff, supervisor or manager, chef, waiting staff, bartender and similar. Favour independent cafés, coffee roasters, bakeries and small groups.
+You may use job sites such as Indeed, IrishJobs, Jobs.ie or LinkedIn ONLY to see who is hiring and for what role. Do not copy anything else from them.
+For each employer, find a GENERAL contact email published on the employer's OWN website (e.g. info@, hello@, jobs@, careers@). Never use a named person's email address, and never guess an address. Skip the employer if you can't find one.
+Skip recruitment agencies and these employers: ${scanned.join('; ')}.
+Reply with ONLY a JSON array, no other text: [{"employer": "...", "role": "job title", "location": "town or county", "email": "...", "website": "https://their own site"}]`;
+  const reply = await callClaudeWithSearch(prompt, env);
+  const start = reply.indexOf('['), end = reply.lastIndexOf(']');
+  if (start < 0 || end < start) return [];
+  let items; try { items = JSON.parse(reply.slice(start, end + 1)); } catch { return []; }
+
+  const ids = [], seen = new Set();
+  for (const it of (Array.isArray(items) ? items : [])) {
+    if (ids.length >= MAX_LEADS) break;
+    const email = validInviteEmail(it && it.email);
+    const employer = String((it && it.employer) || '').trim().slice(0, 80);
+    const role = String((it && it.role) || '').trim().slice(0, 80);
+    if (!email || !employer || !role || seen.has(email)) continue;
+    seen.add(email);
+    if (onBoard.has(norm(employer))) continue;
+    if (await isOptedOut(email, env)) continue;
+    if (await env.FDC_STORE.get(`invite:sent:${email}`)) continue;
+    let website = cleanUrl(it.website);
+    if (website && BLOCKED_JOB_SITES.test(new URL(website).hostname)) website = '';
+    const id = crypto.randomUUID();
+    const lead = { id, token: randomToken(), week: state.week, employer, role,
+      location: String(it.location || '').trim().slice(0, 60), email, website };
+    await env.FDC_STORE.put(`scan:lead:${id}`, JSON.stringify(lead), { expirationTtl: 60 * 60 * 24 * 14 });
+    ids.push(id);
+  }
+  return ids;
+}
+
+function inviteEmailText(lead, inv, env) {
+  const base = env.WORKER_URL || 'https://cv-review.firstdraftcoffee.workers.dev';
+  return `Hi ${lead.employer} team,
+
+I noticed you're hiring a ${lead.role}${lead.location ? ' in ' + lead.location : ''}. I run Dublin Coffee Jobs, Ireland's coffee and hospitality jobs community: 23,000 followers, 10 years running.
+
+Listing is free until the new year. If you'd like your role on it, tap below. The details are already filled in, so it takes about a minute:
+${base}/invite/yes?id=${inv.id}&t=${inv.token}
+
+It goes live straight away and gets shared on our Instagram and Facebook. Applications come straight to you.
+
+If not, no worries, you won't hear from us again about this role.
+
+Ger O'Donohoe
+Dublin Coffee Jobs · ${env.SITE_URL || 'https://dublincoffeejobs.com'}
+
+Don't want any emails from us? ${base}/invite/stop?id=${inv.id}&t=${inv.token}`;
+}
+
+async function sendInvite(lead, env) {
+  if (await isOptedOut(lead.email, env) || await env.FDC_STORE.get(`invite:sent:${lead.email}`)) {
+    await env.FDC_STORE.delete(`scan:lead:${lead.id}`);
+    return false;
+  }
+  const inv = { id: crypto.randomUUID(), token: randomToken(), employer: lead.employer, role: lead.role,
+    location: lead.location, email: lead.email, website: lead.website, sentAt: Date.now() };
+  await env.FDC_STORE.put(`invite:${inv.id}`, JSON.stringify(inv), { expirationTtl: 60 * 60 * 24 * 30 });
+  await env.FDC_STORE.put(`invite:sent:${lead.email}`, '1', { expirationTtl: 60 * 60 * 24 * 90 });
+  // Keeps the "don't email me again" link working for a year, after the invite itself expires.
+  await env.FDC_STORE.put(`invite:stop:${inv.id}`, JSON.stringify({ token: inv.token, email: lead.email }), { expirationTtl: 60 * 60 * 24 * 365 });
+  await env.FDC_STORE.delete(`scan:lead:${lead.id}`);
+  await sendEmailTo(env, lead.email, `Your ${lead.role} vacancy: free listing on Dublin Coffee Jobs?`,
+    inviteEmailText(lead, inv, env), env.ALERT_EMAIL_TO);
+  return true;
+}
+
+function inviteForm(esc, inv, error, v) {
+  v = v || {};
+  const val = (k, d) => esc(v[k] != null ? v[k] : d);
+  const types = ['Full time', 'Part time', 'Contract', 'Seasonal'];
+  return `<h1>Your listing on Dublin Coffee Jobs</h1>
+<p class="meta">Check the details, add a salary, and tap the button. It goes live straight away and is shared on Instagram and Facebook. Free until the new year.</p>
+${error ? `<p style="color:#b4532a"><strong>${esc(error)}</strong></p>` : ''}
+<form method="POST" action="/invite/publish" class="card">
+<input type="hidden" name="id" value="${esc(inv.id)}"><input type="hidden" name="t" value="${esc(inv.token)}">
+<label>Job title<input name="title" required maxlength="120" value="${val('title', inv.role)}"></label>
+<label>Business name<input name="venue" required maxlength="80" value="${val('venue', inv.employer)}"></label>
+<label>Location<input name="location" required maxlength="80" value="${val('location', inv.location)}"></label>
+<label>Salary or hourly rate<input name="salary" required maxlength="60" placeholder="e.g. €14.50/hr or €32k–36k" value="${val('salary', '')}"></label>
+<label>Job type<select name="type">${types.map(x => `<option${(v.type || 'Full time') === x ? ' selected' : ''}>${x}</option>`).join('')}</select></label>
+<label>About the role (optional)<textarea name="desc" rows="4" maxlength="1500">${val('desc', '')}</textarea></label>
+<label>Applications go to (email)<input name="email" type="email" maxlength="120" value="${val('email', inv.email)}"></label>
+<label>Or apply on your website (optional)<input name="applyUrl" maxlength="500" placeholder="https://" value="${val('applyUrl', '')}"></label>
+<button type="submit">Put it live — free</button>
+</form>
+<style>label{display:block;margin:10px 0;font-size:.9rem;color:#6b6157}input,select,textarea{display:block;width:100%;box-sizing:border-box;margin-top:4px;padding:10px;border:1px solid #e3d9cb;border-radius:8px;font:inherit;color:#161310;background:#fff}</style>`;
+}
+
+async function handleInviteRoute(path, request, url, env, ctx) {
+  const site = env.SITE_URL || 'https://dublincoffeejobs.com';
+  const loadLead = async (id, t) => {
+    if (!id || !t) return null;
+    const raw = await env.FDC_STORE.get(`scan:lead:${id}`);
+    if (!raw) return null;
+    const l = JSON.parse(raw);
+    return l.token === t ? l : null;
+  };
+  const loadLeads = async (w, t) => {
+    const raw = await env.FDC_STORE.get('scan:state');
+    const st = raw ? JSON.parse(raw) : null;
+    if (!st || st.week !== w || st.allToken !== t) return null;
+    const out = [];
+    for (const id of (st.leads || [])) { const r = await env.FDC_STORE.get(`scan:lead:${id}`); if (r) out.push(JSON.parse(r)); }
+    return out;
+  };
+  const loadInvite = async (id, t) => {
+    if (!id || !t) return null;
+    const raw = await env.FDC_STORE.get(`invite:${id}`);
+    if (!raw) return null;
+    const inv = JSON.parse(raw);
+    return inv.token === t ? inv : null;
+  };
+  const sentAlready = () => scanPage('Already done', () => `<h1>Nothing to send here</h1><p>This invite has already been sent, or the link is more than 14 days old.</p>`);
+  const leadCard = (esc, l) => `<div class="card"><strong>${esc(l.employer)}</strong> — ${esc(l.role)}<div class="meta">${esc([l.location, l.email].filter(Boolean).join(' · '))}</div>${l.website ? `<div class="meta"><a href="${esc(l.website)}" target="_blank" rel="noopener nofollow">${esc(l.website)}</a></div>` : ''}</div>`;
+
+  // ── Ger's side ──
+  if (path === '/scan/invite' && request.method === 'GET') {
+    const l = await loadLead(url.searchParams.get('id'), url.searchParams.get('t'));
+    if (!l) return sentAlready();
+    const preview = inviteEmailText(l, { id: '…', token: '…' }, env);
+    return scanPage('Send invite?', esc => `<h1>Send this invite?</h1>${leadCard(esc, l)}
+<details class="card"><summary>See the email they'll get</summary><pre style="white-space:pre-wrap;font:inherit">${esc(preview)}</pre></details>
+<form method="POST" action="/scan/invite-send"><input type="hidden" name="id" value="${esc(l.id)}"><input type="hidden" name="t" value="${esc(l.token)}"><button type="submit">Send invite</button></form>`);
+  }
+  if (path === '/scan/invite-send' && request.method === 'POST') {
+    const form = await request.formData();
+    const l = await loadLead(form.get('id'), form.get('t'));
+    if (!l) return sentAlready();
+    const sent = await sendInvite(l, env);
+    return scanPage('Sent', esc => sent
+      ? `<h1>Invite sent ✓</h1><p>${esc(l.employer)} has been invited. If they tap yes, their job goes live and you'll get the usual "Paste into the DCJ Group" email.</p>`
+      : `<h1>Skipped</h1><p>${esc(l.employer)} has already been invited recently or asked not to be emailed.</p>`);
+  }
+  if (path === '/scan/invite-all' && request.method === 'GET') {
+    const w = url.searchParams.get('w'), t = url.searchParams.get('t');
+    const list = await loadLeads(w, t);
+    if (!list || !list.length) return sentAlready();
+    return scanPage('Invite all?', esc => `<h1>Invite all ${list.length}?</h1>${list.map(l => leadCard(esc, l)).join('')}
+<form method="POST" action="/scan/invite-send-all"><input type="hidden" name="w" value="${esc(w)}"><input type="hidden" name="t" value="${esc(t)}"><button type="submit">Send all ${list.length} invites</button></form>`);
+  }
+  if (path === '/scan/invite-send-all' && request.method === 'POST') {
+    const form = await request.formData();
+    const list = await loadLeads(form.get('w'), form.get('t'));
+    if (!list || !list.length) return sentAlready();
+    let n = 0;
+    for (const l of list) if (await sendInvite(l, env)) n++;
+    return scanPage('Sent', () => `<h1>${n} invite${n === 1 ? '' : 's'} sent ✓</h1><p>Anyone who taps yes goes live by themselves.</p>`);
+  }
+
+  // ── The employer's side ──
+  const expired = () => scanPage('Link expired', () => `<h1>This link has expired</h1><p>No problem, you can post your job free on <a href="${site}/job-board.html">dublincoffeejobs.com</a>. It only takes a couple of minutes.</p>`);
+  if (path === '/invite/yes' && request.method === 'GET') {
+    const inv = await loadInvite(url.searchParams.get('id'), url.searchParams.get('t'));
+    if (!inv) return expired();
+    return scanPage('Your listing', esc => inviteForm(esc, inv));
+  }
+  if (path === '/invite/publish' && request.method === 'POST') {
+    const form = await request.formData();
+    const inv = await loadInvite(form.get('id'), form.get('t'));
+    if (!inv) return expired();
+    const f = k => String(form.get(k) || '').trim();
+    const v = { title: f('title').slice(0, 120), venue: f('venue').slice(0, 80), location: f('location').slice(0, 80),
+      salary: f('salary').slice(0, 60), type: f('type').slice(0, 30), desc: f('desc').slice(0, 1500),
+      email: f('email').toLowerCase().slice(0, 120), applyUrl: f('applyUrl').slice(0, 500) };
+    let error = '';
+    if (!v.title || !v.venue || !v.location) error = 'Please fill in the job title, business name and location.';
+    else if (!v.salary) error = 'Please add a salary or hourly rate. Listings with pay get far more applicants.';
+    else if (v.email && !/^[^\s@<>"']+@[^\s@<>"']+\.[a-z]{2,}$/i.test(v.email)) error = 'That email address doesn\'t look right.';
+    else if (v.applyUrl && !/^https?:\/\/[^\s"'<>]+$/i.test(v.applyUrl)) error = 'The website link should start with https://';
+    else if (!v.email && !v.applyUrl) error = 'Please add an email or a website link so people can apply.';
+    if (error) return scanPage('Your listing', esc => inviteForm(esc, inv, error, v));
+
+    const id = crypto.randomUUID();
+    const ttl = 14 * 24 * 60 * 60;
+    const data = { title: v.title, venue: v.venue, location: v.location, salary: v.salary, type: v.type, desc: v.desc };
+    if (v.email) data.email = v.email;
+    if (v.applyUrl) data.applyUrl = v.applyUrl;
+    const record = { id, kind: 'job', tier: 'standard', status: 'published', createdAt: Date.now(),
+      expiresAt: Date.now() + ttl * 1000, flagged: false, freeLaunch: true, invited: true, data };
+    await env.FDC_STORE.put(`listing:${id}`, JSON.stringify(record), { expirationTtl: ttl });
+    await env.FDC_STORE.delete(`invite:${inv.id}`);
+    ctx.waitUntil(postToSocial(record, env));
+    ctx.waitUntil(notifyGroupPost(record, env));
+    ctx.waitUntil(sendListingConfirmation(record, env));
+    return scanPage('Live', esc => `<h1>You're live ✓</h1><p><strong>${esc(v.title)}</strong> at ${esc(v.venue)} is on Dublin Coffee Jobs now and going out on Instagram and Facebook.</p><p><a href="${site}/job-board.html?id=${esc(id)}">See your listing</a></p><p class="meta">Got more roles? Post them free any time at <a href="${site}/job-board.html">dublincoffeejobs.com</a>.</p>`);
+  }
+  if (path === '/invite/stop' && request.method === 'GET') {
+    const id = url.searchParams.get('id'), t = url.searchParams.get('t');
+    let email = '';
+    const stopRaw = id && t ? await env.FDC_STORE.get(`invite:stop:${id}`) : null;
+    if (stopRaw) { const st = JSON.parse(stopRaw); if (st.token === t) email = st.email; }
+    if (email) {
+      await env.FDC_STORE.put(`invite:optout:${email}`, '1');
+      const domain = '@' + email.split('@')[1];
+      if (!/@(gmail|yahoo|hotmail|outlook|icloud|live|eircom)\./.test(domain)) await env.FDC_STORE.put(`invite:optout:${domain}`, '1');
+      await env.FDC_STORE.delete(`invite:${id}`);
+    }
+    return scanPage('Unsubscribed', () => `<h1>Done</h1><p>You won't get any more emails from Dublin Coffee Jobs. Sorry for the bother.</p>`);
   }
   return null;
 }
