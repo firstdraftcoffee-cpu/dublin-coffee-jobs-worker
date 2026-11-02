@@ -20,6 +20,14 @@ const PRICE_IDS = {
 
 const LISTING_DAYS = { job_standard: 14, job_featured: 30, shift_need: 7, shift_need_urgent: 7 };
 
+// FREE LAUNCH SWITCH — set FREE_POSTING = "true" in wrangler.toml [vars]
+// to make Standard job posts, Standard shift-cover posts and contact
+// unlocks free. Featured / Urgent stay paid for anyone who wants to
+// stand out. Set it to "false" (and restore the prices in job-board.html
+// and shift-cover.html) to switch charging back on.
+function isFreeLaunch(env) { return String(env.FREE_POSTING || '').toLowerCase() === 'true'; }
+const FREE_TIERS = { job: 'standard', shift_need: 'need' };
+
 const IRISH_HOSPITALITY_KNOWLEDGE = `
 IRISH HOSPITALITY & COFFEE JOB MARKET KNOWLEDGE (2026) — ground your review in this, not generic advice:
 
@@ -83,6 +91,11 @@ export default {
     }
 
     try {
+      if (path.startsWith('/scan/')) {
+        const scanResponse = await handleScanRoute(path, request, url, env, ctx);
+        if (scanResponse) return scanResponse;
+      }
+
       if ((path === '/cv' || path === '/' || path === '') && request.method === 'POST') {
         const { cv, role } = await request.json();
         if (!cv || cv.length < 100) return jsonResponse({ error: 'CV too short' }, 400, ALLOWED_ORIGIN);
@@ -200,6 +213,15 @@ Brew method: ${method}. Problem: ${issue}`;
         if (kind === 'job' && (!data.salary || !String(data.salary).trim())) {
           return jsonResponse({ error: 'A salary range is required for job listings' }, 400, ALLOWED_ORIGIN);
         }
+        // Optional: the employer's own application page. Only plain web
+        // links are accepted, so nothing else can be smuggled in as a link.
+        if (data.applyUrl) {
+          const link = String(data.applyUrl).trim();
+          if (!/^https?:\/\/[^\s"'<>]+$/i.test(link) || link.length > 500) {
+            return jsonResponse({ error: 'The apply link should be a normal web address starting with https://' }, 400, ALLOWED_ORIGIN);
+          }
+          data.applyUrl = link;
+        }
 
         const id = crypto.randomUUID();
         const record = {
@@ -214,8 +236,27 @@ Brew method: ${method}. Problem: ${issue}`;
           const ttl = 14 * 24 * 60 * 60;
           record.expiresAt = Date.now() + ttl * 1000;
           await env.FDC_STORE.put(`listing:${id}`, JSON.stringify(record), { expirationTtl: ttl });
+          ctx.waitUntil(postToSocial(record, env));
+          ctx.waitUntil(notifyGroupPost(record, env));
           ctx.waitUntil(sendListingConfirmation(record, env));
           return jsonResponse({ published: true, id }, 200, ALLOWED_ORIGIN);
+        }
+
+        // Free launch: Standard posts skip checkout and go live straight
+        // away, with the same social post, Group note and confirmation
+        // email a paid post gets.
+        if (isFreeLaunch(env) && FREE_TIERS[kind] && FREE_TIERS[kind] === (tier || FREE_TIERS[kind])) {
+          record.status = 'published';
+          record.tier = FREE_TIERS[kind];
+          record.freeLaunch = true;
+          const days = LISTING_DAYS[kind === 'job' ? `job_${record.tier}` : `shift_${record.tier}`] || 14;
+          const ttl = days * 24 * 60 * 60;
+          record.expiresAt = Date.now() + ttl * 1000;
+          await env.FDC_STORE.put(`listing:${id}`, JSON.stringify(record), { expirationTtl: ttl });
+          ctx.waitUntil(postToSocial(record, env));
+          ctx.waitUntil(notifyGroupPost(record, env));
+          ctx.waitUntil(sendListingConfirmation(record, env));
+          return jsonResponse({ published: true, free: true, id }, 200, ALLOWED_ORIGIN);
         }
 
         if (kind === 'job' && data.email) {
@@ -290,6 +331,13 @@ Brew method: ${method}. Problem: ${issue}`;
         if (!listingRaw) return jsonResponse({ error: 'That listing was not found or has expired' }, 404, ALLOWED_ORIGIN);
         const listing = JSON.parse(listingRaw);
         if (listing.kind !== 'shift_available') return jsonResponse({ error: 'That listing is not an availability post' }, 400, ALLOWED_ORIGIN);
+
+        // Free launch: email the contact details straight away, no checkout.
+        if (isFreeLaunch(env)) {
+          if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) return jsonResponse({ error: 'Please enter a valid email address' }, 400, ALLOWED_ORIGIN);
+          ctx.waitUntil(sendEmailTo(env, normalizedEmail, 'Contact details for an available staff member', contactRevealText(listing.data || {})));
+          return jsonResponse({ revealed: true }, 200, ALLOWED_ORIGIN);
+        }
 
         const priceId = PRICE_IDS.contact_reveal;
         if (!priceId) return jsonResponse({ error: 'Contact reveal not configured yet' }, 400, ALLOWED_ORIGIN);
@@ -368,9 +416,7 @@ Brew method: ${method}. Problem: ${issue}`;
             const targetRaw = await env.FDC_STORE.get(`listing:${revealListingId}`);
             if (targetRaw) {
               const target = JSON.parse(targetRaw);
-              const d = target.data || {};
-              const text = `Here's the contact info you paid to reveal:\n\nRole: ${d.role || 'Barista'}\nArea: ${d.area || ''}\n${d.rate ? 'Min. rate: ' + d.rate + '\n' : ''}\nEmail: ${d.email || 'not provided'}\n${d.whatsapp ? 'WhatsApp: ' + d.whatsapp + '\n' : ''}\nReach out directly — this is between you and them from here.`;
-              ctx.waitUntil(sendEmailTo(env, revealBuyerEmail, 'Contact details unlocked', text));
+              ctx.waitUntil(sendEmailTo(env, revealBuyerEmail, 'Contact details unlocked', contactRevealText(target.data || {})));
             } else {
               ctx.waitUntil(sendEmailTo(env, revealBuyerEmail, 'Contact details unlocked',
                 'Sorry — that listing has since expired or been removed, so we can\'t send its contact details. If you were charged, reply to this email and we\'ll sort a refund.'));
@@ -855,6 +901,9 @@ Brew method: ${method}. Problem: ${issue}`;
     // how frequently the trigger actually fires.
     await runDigestJob(env, listings);
     await runRenewalReminderJob(env, listings);
+
+    // Monday jobs scan — does a small slice each hour (see runJobScan).
+    try { await runJobScan(env, listings); } catch (e) { console.error('Job scan error:', String(e)); }
   }
 };
 
@@ -986,15 +1035,31 @@ async function verifyStripeSignature(rawBody, sigHeader, secret) {
   return expected === signature;
 }
 
+function contactRevealText(d) {
+  return `Here are the contact details for this available staff member:\n\nRole: ${d.role || 'Barista'}\nArea: ${d.area || ''}\n${d.rate ? 'Min. rate: ' + d.rate + '\n' : ''}\nEmail: ${d.email || 'not provided'}\n${d.whatsapp ? 'WhatsApp: ' + d.whatsapp + '\n' : ''}\nReach out directly — this is between you and them from here.`;
+}
+
+// One wording for every listing type, used by both the automatic
+// Facebook Page / Instagram post and the Group paste email.
+function listingCaption(record, env) {
+  const d = record.data || {};
+  const join = (...parts) => parts.filter(p => p && String(p).trim()).join(' · ');
+  if (record.kind === 'job') {
+    const url = `${env.SITE_URL}/job-board.html?id=${record.id}`;
+    return { url, title: d.title, text: `New job: ${d.title} at ${d.venue}\n${join(d.location, d.salary, d.type)}\n\nApply: ${url}` };
+  }
+  const url = `${env.SITE_URL}/shift-cover.html?id=${record.id}`;
+  if (record.kind === 'shift_available') {
+    const days = Array.isArray(d.availability) ? d.availability.join(', ') : d.availability;
+    return { url, title: `${d.role || 'Staff'} available`, text: `Available for shifts: ${d.role || 'hospitality staff'}${d.years ? ' (' + d.years + ' yrs experience)' : ''}\n${join(d.area, days, d.rate ? 'from ' + d.rate : '')}\n\nShort-staffed? Get in touch free: ${url}` };
+  }
+  return { url, title: d.role, text: `Shift cover needed: ${d.role} at ${d.venue}\n${join(d.location, [d.date, d.hours].filter(Boolean).join(' '), d.rate)}\n\nDetails: ${url}` };
+}
+
 async function notifyGroupPost(record, env) {
   if (!env.ALERT_EMAIL_TO) return;
-  const d = record.data;
-  const isJob = record.kind === 'job';
-  const url = isJob ? `${env.SITE_URL}/job-board.html?id=${record.id}` : `${env.SITE_URL}/shift-cover.html?id=${record.id}`;
-  const caption = isJob
-    ? `New job: ${d.title} at ${d.venue}\n${d.location} · ${d.salary} · ${d.type}\n\nApply: ${url}`
-    : `Shift cover needed: ${d.role} at ${d.venue}\n${d.location} · ${d.date} ${d.hours} · ${d.rate}\n\nDetails: ${url}`;
-  await sendEmailTo(env, env.ALERT_EMAIL_TO, `Paste into the DCJ Group: ${d.title || d.role}`, `A new listing just went live and posted to Instagram + the Facebook Page automatically.\n\nThe Facebook Group still needs a manual paste (Meta doesn't allow apps to auto-post into Groups) — here's the text, ready to copy:\n\n---\n${caption}\n---`);
+  const { title, text: caption } = listingCaption(record, env);
+  await sendEmailTo(env, env.ALERT_EMAIL_TO, `Paste into the DCJ Group: ${title}`, `A new listing just went live and posted to Instagram + the Facebook Page automatically.\n\nThe Facebook Group still needs a manual paste (Meta doesn't allow apps to auto-post into Groups) — here's the text, ready to copy:\n\n---\n${caption}\n---`);
 }
 
 async function sendListingConfirmation(record, env) {
@@ -1287,12 +1352,8 @@ async function postImageAndCaptionToSocial({ imageUrl, caption, link }, env) {
 }
 
 async function postToSocial(record, env) {
-  const d = record.data;
-  const isJob = record.kind === 'job';
-  const url = isJob ? `${env.SITE_URL}/job-board.html?id=${record.id}` : `${env.SITE_URL}/shift-cover.html?id=${record.id}`;
-  const caption = isJob
-    ? `New job: ${d.title} at ${d.venue}\n${d.location} · ${d.salary} · ${d.type}\n\nApply: ${url}\n\n#DublinJobs #HospitalityJobs #DublinCoffeeJobs`
-    : `Shift cover needed: ${d.role} at ${d.venue}\n${d.location} · ${d.date} ${d.hours} · ${d.rate}\n\nDetails: ${url}\n\n#DublinJobs #HospitalityJobs #DublinCoffeeJobs`;
+  const { url, text } = listingCaption(record, env);
+  const caption = `${text}\n\n#DublinJobs #HospitalityJobs #DublinCoffeeJobs`;
 
   const imageUrl = await pickSocialImage(record, env);
   console.log('postToSocial: starting for listing', record.id, 'imageUrl:', imageUrl);
@@ -1353,4 +1414,384 @@ async function sendAlertEmail(env, { subject, text }) {
   } catch (e) {
     console.error('Resend alert send threw an exception:', String(e), 'subject:', subject);
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// WEEKLY JOB SCAN — finds roles on employers' own careers pages,
+// emails Ger a list every Monday morning, and posts each one he
+// approves with one tap. Runs entirely inside this Worker, so no
+// passwords or tokens ever leave Cloudflare.
+//
+// How a Monday goes (the hourly cron calls runJobScan every hour; it
+// does a small slice of work each time so it never hits Worker limits):
+//   from 01:00 Dublin  scan 4 employers per hour, saving new roles as drafts
+//   after scanning     find careers pages for unconfirmed employers, then
+//                      search the web for up to 10 new employers
+//   from 08:00 Dublin  email Ger the list: one "Check & post" link per
+//                      role, plus "Post all"
+// Approve links open a confirm page; posting needs a button press, so
+// email security scanners that "click" links can't post anything.
+// KV keys: scan:employers (the list), scan:state (this week's progress),
+// scan:draft:<id> (a found role, 14 days), scan:seen:<hash> (already
+// offered, 45 days, so Ger isn't asked twice).
+// ═══════════════════════════════════════════════════════════════════
+
+const DEFAULT_SCAN_EMPLOYERS = [
+  { name: 'Insomnia Coffee Company', type: 'Café chain', url: 'https://www.insomnia.ie/careers' },
+  { name: 'EUROSPAR Prendergast Group', type: 'Retail coffee counters', url: 'https://eurosparcareers.recruitee.com' },
+  { name: 'Centra', type: 'Retail coffee counters', url: 'https://centra.ie/careers' },
+  // No confirmed careers page yet — the discovery step looks for one.
+  ...['BaxterStorey', 'Compass Group Ireland (Gather & Gather)', 'CH&CO', 'Aramark Ireland', 'Sodexo Ireland',
+    'Costa Coffee Ireland', 'Eclective Hospitality Group', 'Coffeeangel', 'Java Republic', "Brady's Coffee",
+    'Velo Coffee Roasters', 'Flat Coffee', 'Imbibe Coffee Roasters', 'Soma Coffee Company']
+    .map(name => ({ name, type: '', url: '' })),
+];
+const SCAN_START_HOUR = 1;
+const SCAN_EMAIL_HOUR = 8;
+const BLOCKED_JOB_SITES = /(^|\.)(indeed\.|linkedin\.|jobs\.ie|irishjobs\.ie|jobsireland\.ie|glassdoor\.|ziprecruiter\.|simplyhired\.|jobijoba\.|cv-library\.|recruitireland\.|monster\.)/i;
+
+function dublinNow(now = new Date()) {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/Dublin', weekday: 'short', hour: '2-digit', hourCycle: 'h23',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(now).map(p => [p.type, p.value]));
+  return { weekday: parts.weekday, hour: parseInt(parts.hour, 10), date: `${parts.year}-${parts.month}-${parts.day}` };
+}
+
+function randomToken() {
+  return [...crypto.getRandomValues(new Uint8Array(16))].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function cleanUrl(u) {
+  try {
+    const x = new URL(String(u || '').trim());
+    if (x.protocol !== 'https:' && x.protocol !== 'http:') return '';
+    if (/["'<>\s]/.test(x.href)) return '';
+    return x.href;
+  } catch { return ''; }
+}
+
+async function getScanEmployers(env) {
+  const raw = await env.FDC_STORE.get('scan:employers');
+  return raw ? JSON.parse(raw) : DEFAULT_SCAN_EMPLOYERS.map(e => ({ ...e }));
+}
+
+// Called on every cron run; does nothing outside Monday's window.
+async function runJobScan(env, listings, now = new Date()) {
+  if (!env.ANTHROPIC_API_KEY || !env.ALERT_EMAIL_TO) return;
+  const t = dublinNow(now);
+  if (t.weekday !== 'Mon' || t.hour < SCAN_START_HOUR) return;
+
+  const stateRaw = await env.FDC_STORE.get('scan:state');
+  let state = stateRaw ? JSON.parse(stateRaw) : null;
+  if (!state || state.week !== t.date) {
+    state = { week: t.date, phase: 'scan', cursor: 0, drafts: [], allToken: randomToken(), notes: [], addedEmployers: [] };
+  }
+  const save = () => env.FDC_STORE.put('scan:state', JSON.stringify(state), { expirationTtl: 60 * 60 * 24 * 14 });
+
+  if (state.phase === 'scan') {
+    const employers = await getScanEmployers(env);
+    // Spread the list over ~5 hourly runs so it's done well before 8am,
+    // but never more than 10 per run (Worker limits).
+    const batch = Math.min(10, Math.max(4, Math.ceil(employers.length / 5)));
+    const slice = employers.slice(state.cursor, state.cursor + batch);
+    for (const emp of slice) {
+      if (!emp.url) continue;
+      try {
+        const roles = await scanEmployer(emp, env);
+        for (const role of roles) {
+          const id = await saveDraftIfNew(role, emp, listings, state, env);
+          if (id) state.drafts.push(id);
+        }
+      } catch (e) {
+        console.error('Job scan failed for', emp.name, String(e));
+        state.notes.push(`Couldn't read ${emp.name}'s careers page this week.`);
+      }
+    }
+    state.cursor += batch;
+    if (state.cursor >= employers.length) state.phase = 'discover';
+    await save();
+    return;
+  }
+
+  if (state.phase === 'discover') {
+    try {
+      state.addedEmployers = await discoverEmployers(env);
+    } catch (e) {
+      console.error('Employer discovery failed:', String(e));
+      state.notes.push("Couldn't search for new employers this week.");
+    }
+    state.phase = 'ready';
+    await save();
+    return;
+  }
+
+  if (state.phase === 'ready' && t.hour >= SCAN_EMAIL_HOUR) {
+    await sendScanEmail(state, env);
+    state.phase = 'emailed';
+    await save();
+  }
+}
+
+// Fetches one careers page and asks Claude to pick out the relevant roles.
+async function scanEmployer(emp, env) {
+  const pageUrl = cleanUrl(emp.url);
+  if (!pageUrl) return [];
+  const host = new URL(pageUrl).hostname;
+  let text = '', links = [];
+
+  if (/\.recruitee\.com$/i.test(host)) {
+    // Recruitee publishes a tidy feed of every opening.
+    const res = await fetch(`https://${host}/api/offers/`, { headers: { 'Accept': 'application/json' } });
+    if (!res.ok) throw new Error('Recruitee feed ' + res.status);
+    const feed = await res.json();
+    const offers = (feed.offers || []).slice(0, 60).map(o => ({
+      title: o.title, location: [o.city, o.country].filter(Boolean).join(', '),
+      type: o.employment_type_code || '', link: o.careers_url || o.careers_apply_url || '',
+      about: String(o.description || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 300),
+    }));
+    text = JSON.stringify(offers);
+    links = offers.map(o => ({ text: o.title, href: cleanUrl(o.link) })).filter(l => l.href);
+  } else {
+    const res = await fetch(pageUrl, { headers: { 'User-Agent': 'DublinCoffeeJobsBot/1.0 (+https://dublincoffeejobs.com)', 'Accept': 'text/html' } });
+    if (!res.ok) throw new Error('Page ' + res.status);
+    const html = (await res.text()).slice(0, 250000);
+    const seen = new Set();
+    for (const m of html.matchAll(/<a\b[^>]*href\s*=\s*["']([^"'#]+)["'][^>]*>([\s\S]*?)<\/a>/gi)) {
+      let href; try { href = cleanUrl(new URL(m[1], pageUrl).href); } catch { continue; }
+      if (!href || seen.has(href)) continue;
+      seen.add(href);
+      const label = m[2].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80);
+      links.push({ text: label, href });
+      if (links.length >= 250) break;
+    }
+    text = html.replace(/<(script|style|noscript|svg)[\s\S]*?<\/\1>/gi, ' ').replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ').slice(0, 30000);
+  }
+
+  const prompt = `You are helping a coffee and hospitality jobs board in Ireland.
+Below is the careers page of "${emp.name}" (${pageUrl}), plus the links on it.
+List the CURRENT job openings that are (a) located in Ireland and (b) front-line coffee, café, hospitality or kitchen roles: barista, head barista, café or shop manager/supervisor, team member/customer assistant in a café or coffee counter, roaster, coffee trainer, coffee/wholesale sales, waiting staff, bartender, chef, baker, kitchen porter, hotel front-of-house and similar.
+Leave out head office, IT, finance, warehouse, driving and retail roles with no café or food element. Leave out anything that is not clearly an open vacancy. If there are none, return [].
+Reply with ONLY a JSON array, no other text. Each item:
+{"title": "...", "location": "town or county", "salary": "only if stated, else empty", "type": "Full time / Part time / Contract or empty", "applyUrl": "the most specific link from the LINKS list for this role, or the careers page", "summary": "one or two plain sentences about the role, in your own words"}
+
+LINKS:
+${links.map(l => `- ${l.text} → ${l.href}`).join('\n').slice(0, 20000)}
+
+PAGE:
+${text}`;
+
+  const data = await callClaude(prompt, env, 3000);
+  const reply = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
+  const start = reply.indexOf('['), end = reply.lastIndexOf(']');
+  if (start < 0 || end < start) return [];
+  let roles; try { roles = JSON.parse(reply.slice(start, end + 1)); } catch { return []; }
+  if (!Array.isArray(roles)) return [];
+
+  const allowed = new Set([pageUrl, ...links.map(l => l.href)]);
+  return roles.slice(0, 25).map(r => {
+    const title = String(r.title || '').trim().slice(0, 120);
+    // Only accept links that really appeared on the page — never one the AI made up.
+    const link = cleanUrl(r.applyUrl);
+    return {
+      title,
+      location: String(r.location || '').trim().slice(0, 80) || 'Ireland',
+      salary: String(r.salary || '').trim().slice(0, 60),
+      type: String(r.type || '').trim().slice(0, 30),
+      applyUrl: link && allowed.has(link) ? link : pageUrl,
+      summary: String(r.summary || '').trim().slice(0, 400),
+    };
+  }).filter(r => r.title);
+}
+
+async function saveDraftIfNew(role, emp, listings, state, env) {
+  const key = `${emp.name}|${role.title}|${role.location}`.toLowerCase().replace(/\s+/g, ' ');
+  const seenKey = 'scan:seen:' + await hashText(key);
+  if (await env.FDC_STORE.get(seenKey)) return null;
+  const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const alreadyLive = listings.some(l => l.kind === 'job' && !l.flagged &&
+    norm(l.data && l.data.venue) === norm(emp.name) && norm(l.data && l.data.title) === norm(role.title));
+  if (alreadyLive) return null;
+
+  const id = crypto.randomUUID();
+  const draft = { id, token: randomToken(), week: state.week, allToken: state.allToken, employer: emp.name, ...role, createdAt: Date.now() };
+  await env.FDC_STORE.put(`scan:draft:${id}`, JSON.stringify(draft), { expirationTtl: 60 * 60 * 24 * 14 });
+  await env.FDC_STORE.put(seenKey, '1', { expirationTtl: 60 * 60 * 24 * 45 });
+  return id;
+}
+
+// Uses Claude with web search to (1) find careers pages for employers
+// on the list that don't have one yet and (2) add up to 10 new ones.
+async function discoverEmployers(env) {
+  const employers = await getScanEmployers(env);
+  const missing = employers.filter(e => !e.url).map(e => e.name);
+  const known = employers.map(e => e.name);
+  const prompt = `You are building a list of employers for a coffee and hospitality jobs board in Ireland.
+Task 1: find the employer's OWN careers or jobs page for each of these: ${missing.length ? missing.join('; ') : '(none)'}.
+Task 2: find up to 10 MORE employers based in Ireland that hire baristas, café, coffee or hospitality staff AND have their own careers page: specialty coffee roasters, café groups, bakery-café chains, hotel groups, contract caterers. Do not repeat any of these: ${known.join('; ')}.
+Only use the employer's own website or their own hiring page (for example on Workable, Teamtailor, Recruitee, Harri, BambooHR). Never use Indeed, LinkedIn, Jobs.ie, IrishJobs, JobsIreland, Glassdoor or recruitment agencies.
+When finished, reply with ONLY a JSON array, no other text: [{"name": "...", "type": "short description", "url": "https://..."}], including Task 1 results under their exact names above. Leave out any employer whose careers page you could not find.`;
+
+  const found = await callClaudeWithSearch(prompt, env);
+  const start = found.indexOf('['), end = found.lastIndexOf(']');
+  if (start < 0 || end < start) return [];
+  let items; try { items = JSON.parse(found.slice(start, end + 1)); } catch { return []; }
+
+  const added = [];
+  const byName = new Map(employers.map(e => [e.name.toLowerCase(), e]));
+  const hosts = new Set(employers.filter(e => e.url).map(e => { try { return new URL(e.url).hostname; } catch { return ''; } }));
+  for (const it of (Array.isArray(items) ? items : []).slice(0, 25)) {
+    const url = cleanUrl(it && it.url);
+    const name = String((it && it.name) || '').trim().slice(0, 80);
+    if (!url || !name) continue;
+    const host = new URL(url).hostname;
+    if (BLOCKED_JOB_SITES.test(host)) continue;
+    const existing = byName.get(name.toLowerCase());
+    if (existing) {
+      if (!existing.url) { existing.url = url; added.push(`${name} (careers page found)`); hosts.add(host); }
+      continue;
+    }
+    if (hosts.has(host) || added.length >= 14) continue;
+    const emp = { name, type: String(it.type || '').slice(0, 60), url };
+    employers.push(emp); byName.set(name.toLowerCase(), emp); hosts.add(host);
+    added.push(name);
+  }
+  await env.FDC_STORE.put('scan:employers', JSON.stringify(employers));
+  return added;
+}
+
+async function callClaudeWithSearch(prompt, env) {
+  let messages = [{ role: 'user', content: prompt }];
+  let text = '';
+  for (let round = 0; round < 3; round++) {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-5', max_tokens: 4000, messages,
+        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 8,
+          user_location: { type: 'approximate', country: 'IE', city: 'Dublin', timezone: 'Europe/Dublin' } }],
+      }),
+    });
+    const data = await res.json();
+    if (!data.content) throw new Error('Claude API error: ' + JSON.stringify(data).slice(0, 300));
+    text = data.content.filter(b => b.type === 'text').map(b => b.text).join('');
+    if (data.stop_reason !== 'pause_turn') break;
+    messages = [...messages, { role: 'assistant', content: data.content }];
+  }
+  return text;
+}
+
+async function sendScanEmail(state, env) {
+  const base = env.WORKER_URL || 'https://cv-review.firstdraftcoffee.workers.dev';
+  const drafts = [];
+  for (const id of state.drafts) {
+    const raw = await env.FDC_STORE.get(`scan:draft:${id}`);
+    if (raw) drafts.push(JSON.parse(raw));
+  }
+  const [y, m, d] = state.week.split('-');
+  const lines = [];
+  if (drafts.length) {
+    lines.push(`${drafts.length} new role${drafts.length === 1 ? '' : 's'} found on employers' own careers pages this week.`, '',
+      'Tap "Check & post" on any you want on the board — it goes live straight away and out on Instagram and Facebook. Ignore the rest; they won\'t come back.', '');
+    drafts.forEach((r, i) => {
+      lines.push(`${i + 1}. ${r.title} — ${r.employer}`,
+        `   ${[r.location, r.salary, r.type].filter(Boolean).join(' · ')}`,
+        `   Check & post: ${base}/scan/review?id=${r.id}&t=${r.token}`, '');
+    });
+    lines.push(`Post all ${drafts.length}: ${base}/scan/review-all?w=${state.week}&t=${state.allToken}`, '');
+  } else {
+    lines.push('No new roles on the watched careers pages this week.', '');
+  }
+  if (state.addedEmployers.length) lines.push(`Added to next week's scan: ${state.addedEmployers.join(', ')}.`, '');
+  if (state.notes.length) lines.push(...state.notes, '');
+  lines.push('Links work for 14 days.');
+  await sendEmailTo(env, env.ALERT_EMAIL_TO,
+    drafts.length ? `${drafts.length} new jobs to post — ${d}/${m}/${y.slice(2)}` : `Jobs scan — nothing new (${d}/${m}/${y.slice(2)})`,
+    lines.join('\n'));
+}
+
+async function publishDraft(draft, env, ctx) {
+  const id = crypto.randomUUID();
+  const ttl = 14 * 24 * 60 * 60;
+  const record = {
+    id, kind: 'job', tier: 'standard', status: 'published', createdAt: Date.now(),
+    expiresAt: Date.now() + ttl * 1000, flagged: false, spotted: true,
+    data: {
+      title: draft.title, venue: draft.employer, location: draft.location,
+      salary: draft.salary || 'See their site', type: draft.type || '',
+      desc: `${draft.summary ? draft.summary + '\n\n' : ''}Spotted on ${draft.employer}'s own careers page — apply directly on their website.`,
+      applyUrl: draft.applyUrl, skipScoring: true,
+    },
+  };
+  await env.FDC_STORE.put(`listing:${id}`, JSON.stringify(record), { expirationTtl: ttl });
+  await env.FDC_STORE.delete(`scan:draft:${draft.id}`);
+  ctx.waitUntil(postToSocial(record, env));
+  ctx.waitUntil(notifyGroupPost(record, env));
+  return record;
+}
+
+function scanPage(title, body) {
+  const esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>${esc(title)}</title>
+<style>body{font-family:system-ui,sans-serif;background:#f5efe6;color:#161310;margin:0;padding:24px 16px}main{max-width:560px;margin:0 auto}
+.card{background:#fff;border:1px solid #e3d9cb;border-radius:12px;padding:14px 16px;margin:10px 0}h1{font-size:1.4rem}.meta{color:#6b6157;font-size:.9rem}
+button{background:#b4532a;color:#fff;border:0;border-radius:999px;padding:14px 22px;font-size:1rem;width:100%;margin-top:14px;cursor:pointer}a{color:#b4532a}</style></head>
+<body><main>${body(esc)}</main></body></html>`;
+  return new Response(html, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' } });
+}
+
+function draftCard(esc, d) {
+  return `<div class="card"><strong>${esc(d.title)}</strong> — ${esc(d.employer)}<div class="meta">${esc([d.location, d.salary, d.type].filter(Boolean).join(' · '))}</div>${d.summary ? `<p>${esc(d.summary)}</p>` : ''}<div class="meta">Applicants go to: <a href="${esc(d.applyUrl)}" target="_blank" rel="noopener nofollow">${esc(d.applyUrl)}</a></div></div>`;
+}
+
+// Routes for the approve links. Returns null when the path isn't one of these.
+async function handleScanRoute(path, request, url, env, ctx) {
+  const site = env.SITE_URL || 'https://dublincoffeejobs.com';
+  const loadDraft = async (id, t) => {
+    if (!id || !t) return null;
+    const raw = await env.FDC_STORE.get(`scan:draft:${id}`);
+    if (!raw) return null;
+    const d = JSON.parse(raw);
+    return d.token === t ? d : null;
+  };
+  const loadWeek = async (w, t) => {
+    const raw = await env.FDC_STORE.get('scan:state');
+    const st = raw ? JSON.parse(raw) : null;
+    if (!st || st.week !== w || st.allToken !== t) return null;
+    const out = [];
+    for (const id of st.drafts) { const r = await env.FDC_STORE.get(`scan:draft:${id}`); if (r) out.push(JSON.parse(r)); }
+    return out;
+  };
+  const gone = () => scanPage('Already done', () => `<h1>Nothing to post here</h1><p>This one has already been posted, or the link is more than 14 days old.</p><p><a href="${site}/job-board.html">Open the job board</a></p>`);
+
+  if (path === '/scan/review' && request.method === 'GET') {
+    const d = await loadDraft(url.searchParams.get('id'), url.searchParams.get('t'));
+    if (!d) return gone();
+    return scanPage('Post this job?', esc => `<h1>Post this job?</h1>${draftCard(esc, d)}
+<form method="POST" action="/scan/approve"><input type="hidden" name="id" value="${esc(d.id)}"><input type="hidden" name="t" value="${esc(d.token)}"><button type="submit">Post it — free, goes out on Instagram & Facebook</button></form>`);
+  }
+  if (path === '/scan/approve' && request.method === 'POST') {
+    const form = await request.formData();
+    const d = await loadDraft(form.get('id'), form.get('t'));
+    if (!d) return gone();
+    const rec = await publishDraft(d, env, ctx);
+    return scanPage('Posted', esc => `<h1>Posted ✓</h1><p><strong>${esc(d.title)}</strong> at ${esc(d.employer)} is live and going out on Instagram and Facebook.</p><p><a href="${site}/job-board.html?id=${esc(rec.id)}">See it on the board</a></p>`);
+  }
+  if (path === '/scan/review-all' && request.method === 'GET') {
+    const w = url.searchParams.get('w'), t = url.searchParams.get('t');
+    const list = await loadWeek(w, t);
+    if (!list || !list.length) return gone();
+    return scanPage('Post all?', esc => `<h1>Post all ${list.length}?</h1>${list.map(d => draftCard(esc, d)).join('')}
+<form method="POST" action="/scan/approve-all"><input type="hidden" name="w" value="${esc(w)}"><input type="hidden" name="t" value="${esc(t)}"><button type="submit">Post all ${list.length}</button></form>`);
+  }
+  if (path === '/scan/approve-all' && request.method === 'POST') {
+    const form = await request.formData();
+    const list = await loadWeek(form.get('w'), form.get('t'));
+    if (!list || !list.length) return gone();
+    for (const d of list) await publishDraft(d, env, ctx);
+    return scanPage('Posted', () => `<h1>Posted ✓</h1><p>${list.length} jobs are live and going out on Instagram and Facebook.</p><p><a href="${site}/job-board.html">Open the job board</a></p>`);
+  }
+  return null;
 }
