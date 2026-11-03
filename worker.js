@@ -1469,6 +1469,7 @@ const DEFAULT_SCAN_EMPLOYERS = [
   { name: 'Boojum', type: 'Burrito restaurants', url: 'https://boojumltd.teamtailor.com/jobs' },
   { name: 'The Natural Bakery', type: 'Bakery-cafés', url: 'https://thenaturalbakery.ie/careers/' },
   { name: 'Twobeans Speciality Coffee Bar (Dún Laoghaire)', type: 'Specialty coffee', url: 'https://www.twobeans.ie/jobs' },
+  { name: 'Ground Coffee (Northern Ireland)', type: 'Coffee shops', url: 'https://groundcoffee.net/work-us/' },
   { name: 'Café Sol', type: 'Coffee shops & Dunnes kiosks', url: '', formOnly: true },
   { name: 'Coffeeangel', type: 'Specialty coffee', url: '', formOnly: true },   // careers page has no job list (checked 03/11/26)
 ];
@@ -1643,7 +1644,7 @@ async function scanEmployer(emp, env) {
 
   const prompt = `You are helping a coffee and hospitality jobs board in Ireland.
 Below is the careers page of "${emp.name}" (${pageUrl}), plus the links on it.
-List the CURRENT job openings that are (a) located in Ireland and (b) front-line coffee, café, hospitality or kitchen roles: barista, head barista, café or shop manager/supervisor, team member/customer assistant in a café or coffee counter, roaster, coffee trainer, coffee/wholesale sales, waiting staff, bartender, chef, baker, kitchen porter, hotel front-of-house and similar.
+List the CURRENT job openings that are (a) located on the island of Ireland (the Republic or Northern Ireland) and (b) front-line coffee, café, hospitality or kitchen roles: barista, head barista, café or shop manager/supervisor, team member/customer assistant in a café or coffee counter, roaster, coffee trainer, coffee/wholesale sales, waiting staff, bartender, chef, baker, kitchen porter, hotel front-of-house and similar.
 Leave out head office, IT, finance, warehouse, driving and retail roles with no café or food element. Leave out anything that is not clearly an open vacancy. If there are none, return [].
 List at most 25 roles, most coffee-focused first.
 Reply with ONLY a JSON array, no other text. Each item:
