@@ -1448,7 +1448,7 @@ const DEFAULT_SCAN_EMPLOYERS = [
   { name: 'Centra', type: 'Retail coffee counters (each shop hires itself)', url: '', formOnly: true },
   // No confirmed careers page yet — the discovery step looks for one.
   ...['BaxterStorey', 'Compass Group Ireland (Gather & Gather)', 'CH&CO', 'Aramark Ireland', 'Sodexo Ireland',
-    'Costa Coffee Ireland', 'Eclective Hospitality Group', 'Coffeeangel', 'Java Republic', "Brady's Coffee",
+    'Costa Coffee Ireland', 'Eclective Hospitality Group', 'Java Republic', "Brady's Coffee",
     'Velo Coffee Roasters', 'Flat Coffee', 'Imbibe Coffee Roasters', 'Soma Coffee Company']
     .map(name => ({ name, type: '', url: '' })),
   // Added 02/11/26 — Irish coffee chains and well-known independents.
@@ -1470,6 +1470,7 @@ const DEFAULT_SCAN_EMPLOYERS = [
   { name: 'The Natural Bakery', type: 'Bakery-cafés', url: 'https://thenaturalbakery.ie/careers/' },
   { name: 'Twobeans Speciality Coffee Bar (Dún Laoghaire)', type: 'Specialty coffee', url: 'https://www.twobeans.ie/jobs' },
   { name: 'Café Sol', type: 'Coffee shops & Dunnes kiosks', url: '', formOnly: true },
+  { name: 'Coffeeangel', type: 'Specialty coffee', url: '', formOnly: true },   // careers page has no job list (checked 03/11/26)
 ];
 const SCAN_START_HOUR = 1;
 // One-off extra scan days on top of every Monday (YYYY-MM-DD, Dublin time).
@@ -1512,6 +1513,8 @@ async function getScanEmployers(env) {
   for (const d of DEFAULT_SCAN_EMPLOYERS) {
     const e = byName.get(d.name.toLowerCase());
     if (e && !e.url && d.url) { e.url = d.url; e.formOnly = false; if (d.pages) e.pages = d.pages; }
+    if (e && d.formOnly && !d.url && e.url && /coffeeangel\.com/.test(e.url)) e.url = '';   // a found page with no job list
+    if (e && !e.url && d.formOnly) e.formOnly = true;
   }
   const have = new Set(list.map(e => e.name.toLowerCase()));
   for (const e of DEFAULT_SCAN_EMPLOYERS) if (!have.has(e.name.toLowerCase())) list.push({ ...e });
@@ -2031,7 +2034,7 @@ async function handleScanRoute(path, request, url, env, ctx) {
 // or @domain> (forever).
 // ═══════════════════════════════════════════════════════════════════
 
-const GENERIC_INBOX = /^(info|hello|hi|jobs|job|careers|career|recruitment|recruit|recruiting|hr|people|work|team|contact|enquiries|enquiry|hiring|admin|office|cafe|coffee|bookings|reservations|manager|management|general|mail)([.\-_]?[a-z0-9]*)?$/i;
+const GENERIC_INBOX = /^(info|hello|hi|jobs|job|careers|career|recruitment|recruit|recruiting|hr|people|work|team|contact|enquiries|enquiry|hiring|admin|office|cafe|coffee|shop|bookings|reservations|manager|management|general|mail)([.\-_]?[a-z0-9]*)?$/i;
 const MAX_LEADS = 20;
 
 function validInviteEmail(e) {
