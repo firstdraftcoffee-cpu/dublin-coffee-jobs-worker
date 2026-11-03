@@ -2042,6 +2042,12 @@ async function handleScanRoute(path, request, url, env, ctx) {
 
 const GENERIC_INBOX = /^(info|hello|hi|jobs|job|careers|career|recruitment|recruit|recruiting|hr|people|work|team|contact|enquiries|enquiry|hiring|admin|office|cafe|coffee|shop|bookings|reservations|manager|management|general|mail)([.\-_]?[a-z0-9]*)?$/i;
 const MAX_LEADS = 20;
+// Employers Ger has spotted hiring (one-off posts, no jobs page). Offered once
+// in the next email as an invite; checked against opt-outs and repeats as usual.
+const MANUAL_INVITE_LEADS = [
+  { employer: 'Cloud Picker Coffee', role: 'Production Assistant / Barista', location: 'Dublin',
+    email: 'hello@cloudpickercoffee.ie', website: 'https://cloudpickercoffee.ie' },   // seen 03/11/26, blog post dated 07/09/26
+];
 
 function validInviteEmail(e) {
   const email = String(e || '').trim().toLowerCase();
@@ -2069,13 +2075,23 @@ For each employer, find a GENERAL contact email published on the employer's OWN 
 Check these first, and include any that are hiring now: ${watch.join('; ')}.
 Skip recruitment agencies and these employers: ${scanned.join('; ')}.
 Reply with ONLY a JSON array, no other text: [{"employer": "...", "role": "job title", "location": "town or county", "email": "...", "website": "https://their own site"}]`;
-  const reply = await callClaudeWithSearch(prompt, env);
-  const start = reply.indexOf('['), end = reply.lastIndexOf(']');
-  if (start < 0 || end < start) return [];
-  let items; try { items = JSON.parse(reply.slice(start, end + 1)); } catch { return []; }
+  let found = [];
+  try {
+    found = parseJsonArray(await callClaudeWithSearch(prompt, env));
+  } catch (e) {
+    state.notes.push(`Couldn't look for employers to invite this time. Reason: ${String(e.message || e).slice(0, 220)}`);
+  }
+  const manual = [];
+  for (const m of MANUAL_INVITE_LEADS) {
+    const offered = `invite:offered:${m.email}`;
+    if (await env.FDC_STORE.get(offered)) continue;
+    await env.FDC_STORE.put(offered, '1', { expirationTtl: 60 * 60 * 24 * 30 });
+    manual.push(m);
+  }
+  const items = [...manual, ...found];
 
   const ids = [], seen = new Set();
-  for (const it of (Array.isArray(items) ? items : [])) {
+  for (const it of items) {
     if (ids.length >= MAX_LEADS) break;
     const email = validInviteEmail(it && it.email);
     const employer = String((it && it.employer) || '').trim().slice(0, 80);
