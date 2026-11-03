@@ -1470,6 +1470,7 @@ const DEFAULT_SCAN_EMPLOYERS = [
   { name: 'The Natural Bakery', type: 'Bakery-cafés', url: 'https://thenaturalbakery.ie/careers/' },
   { name: 'Twobeans Speciality Coffee Bar (Dún Laoghaire)', type: 'Specialty coffee', url: 'https://www.twobeans.ie/jobs' },
   { name: 'Ground Coffee (Northern Ireland)', type: 'Coffee shops', url: 'https://groundcoffee.net/work-us/' },
+  { name: "Bewley's Grafton Street", type: 'Café', url: 'https://bewleysgraftonstreet.com/work-with-us/' },
   { name: 'Café Sol', type: 'Coffee shops & Dunnes kiosks', url: '', formOnly: true },
   { name: 'Coffeeangel', type: 'Specialty coffee', url: '', formOnly: true },   // careers page has no job list (checked 03/11/26)
 ];
@@ -2363,6 +2364,10 @@ function detectAts(pageUrl, html) {
       }
     }
   }
+  // WordPress "WP Job Manager" plugin: jobs load in after the page opens.
+  if (html && /wp-job-manager|class="job_listings|jm-ajax/i.test(html)) {
+    try { return { kind: 'wpjm', id: new URL(pageUrl).origin }; } catch {}
+  }
   return null;
 }
 
@@ -2403,6 +2408,31 @@ async function fetchAtsOffers({ kind, id }) {
       const f = await getJson(`https://api.smartrecruiters.com/v1/companies/${id}/postings?limit=100`);
       return (f.content || []).map(j => ({ title: j.name, location: join(j.location && j.location.city, j.location && j.location.country),
         type: (j.typeOfEmployment && j.typeOfEmployment.label) || '', link: `https://jobs.smartrecruiters.com/${id}/${j.id}`, about: '' }));
+    }
+    case 'wpjm': {
+      const origin = id;
+      const clean = v => String(v || '').replace(/<!\[CDATA\[|\]\]>/g, '').replace(/<[^>]+>/g, ' ').replace(/&amp;/g, '&').replace(/&#0?39;|&#8217;/g, "'").replace(/\s+/g, ' ').trim();
+      // 1) the plugin's job feed
+      try {
+        const r = await fetch(`${origin}/?feed=job_feed`, { headers: { 'Accept': 'application/rss+xml, application/xml, text/xml' } });
+        const xml = r.ok ? await r.text() : '';
+        if (/<item>/i.test(xml)) {
+          return [...xml.matchAll(/<item>([\s\S]*?)<\/item>/gi)].map(m => {
+            const tag = t => clean((m[1].match(new RegExp(`<${t}[^>]*>([\\s\\S]*?)</${t}>`, 'i')) || [])[1]);
+            return { title: tag('title'), location: tag('job_listing:location'), type: tag('job_listing:job_type'), link: tag('link'), about: tag('description').slice(0, 300) };
+          }).filter(o => o.title);
+        }
+      } catch {}
+      // 2) the plugin's own listing request
+      const r2 = await fetch(`${origin}/jm-ajax/get_listings/?per_page=50&page=1`, { headers: { 'Accept': 'application/json' } });
+      if (!r2.ok) throw new Error('job list ' + r2.status);
+      const j = await r2.json();
+      const html = String(j.html || '');
+      return [...html.matchAll(/<a[^>]+href="([^"]+)"[\s\S]*?<h3[^>]*>([\s\S]*?)<\/h3>([\s\S]*?)(?=<a[^>]+href=|$)/gi)].map(m => ({
+        title: clean(m[2]), link: m[1],
+        location: clean((m[3].match(/class="location"[^>]*>([\s\S]*?)<\//i) || [])[1]),
+        type: clean((m[3].match(/class="job-type[^"]*"[^>]*>([\s\S]*?)<\//i) || [])[1]), about: '',
+      })).filter(o => o.title);
     }
     case 'personio': {
       const r = await fetch(`https://${id}.jobs.personio.de/xml`);
