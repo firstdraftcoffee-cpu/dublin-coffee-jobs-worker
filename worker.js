@@ -1547,9 +1547,10 @@ async function runJobScan(env, listings, now = new Date()) {
   const save = () => env.FDC_STORE.put('scan:state', JSON.stringify(state), { expirationTtl: 60 * 60 * 24 * 14 });
 
   if (state.phase === 'scan') {
-    const employers = await getScanEmployers(env);
-    // Spread the list over ~5 hourly runs so it's done well before 8am,
-    // but never more than 12 per run (Worker limits).
+    // Only employers with a careers link need scanning (the rest are found by
+    // discovery or invites). Spread them over ~5 hourly runs so it's done well
+    // before 8am, never more than 12 per run (Worker limits).
+    const employers = (await getScanEmployers(env)).filter(e => e.url);
     const batch = Math.min(12, Math.max(4, Math.ceil(employers.length / 5)));
     const slice = employers.slice(state.cursor, state.cursor + batch);
     for (const emp of slice) {
