@@ -1046,6 +1046,10 @@ function contactRevealText(d) {
 function listingCaption(record, env) {
   const d = record.data || {};
   const join = (...parts) => parts.filter(p => p && String(p).trim()).join(' · ');
+  if (record.kind === 'job' && record.roundup) {
+    const url = `${env.SITE_URL}/job-board.html?id=${record.id}`;
+    return { url, title: d.title, text: `Now hiring: ${d.venue}\n${d.roundupLine || ''}\n\nSee the roles: ${url}` };
+  }
   if (record.kind === 'job') {
     const url = `${env.SITE_URL}/job-board.html?id=${record.id}`;
     return { url, title: d.title, text: `New job: ${d.title} at ${d.venue}\n${join(d.location, d.salary, d.type)}\n\nApply: ${url}` };
@@ -1459,9 +1463,15 @@ const DEFAULT_SCAN_EMPLOYERS = [
     'Golden Bean Coffee (Kerry)', 'Coffeewerk + Press (Galway)']
     .map(name => ({ name, type: 'Coffee', url: '' })),
   { name: 'Griolladh', type: 'Toastie & coffee chain', url: '', formOnly: true },
+  // Added 03/11/26 — big readable careers sites (capped at 3 roles a week each in the email).
+  { name: 'Dalata Hotel Group (Clayton & Maldron hotels)', type: 'Hotels', url: 'https://careers.dalatahotelgroup.com/jobs',
+    pages: { template: 'https://careers.dalatahotelgroup.com/jobs?paged={p}', from: 2, step: 1, count: 5 } },
+  { name: 'Boojum', type: 'Burrito restaurants', url: 'https://boojumltd.teamtailor.com/jobs' },
   { name: 'Café Sol', type: 'Coffee shops & Dunnes kiosks', url: '', formOnly: true },
 ];
 const SCAN_START_HOUR = 1;
+// One-off extra scan days on top of every Monday (YYYY-MM-DD, Dublin time).
+const EXTRA_SCAN_DATES = ['2026-11-03'];
 const SCAN_EMAIL_HOUR = 8;
 const BLOCKED_JOB_SITES = /(^|\.)(indeed\.|linkedin\.|jobs\.ie|irishjobs\.ie|jobsireland\.ie|glassdoor\.|ziprecruiter\.|simplyhired\.|jobijoba\.|cv-library\.|recruitireland\.|monster\.)/i;
 
@@ -1502,11 +1512,13 @@ async function getScanEmployers(env) {
 async function runJobScan(env, listings, now = new Date()) {
   if (!env.ANTHROPIC_API_KEY || !env.ALERT_EMAIL_TO) return;
   const t = dublinNow(now);
-  if (t.weekday !== 'Mon' || t.hour < SCAN_START_HOUR) return;
+  if ((t.weekday !== 'Mon' && !EXTRA_SCAN_DATES.includes(t.date)) || t.hour < SCAN_START_HOUR) return;
 
   const stateRaw = await env.FDC_STORE.get('scan:state');
   let state = stateRaw ? JSON.parse(stateRaw) : null;
   if (!state || state.week !== t.date) {
+    // Keep last run's state for 14 days so its "Post all" / "Invite all" links still work.
+    if (state) await env.FDC_STORE.put(`scan:state:${state.week}`, JSON.stringify(state), { expirationTtl: 60 * 60 * 24 * 14 });
     state = { week: t.date, phase: 'scan', cursor: 0, drafts: [], allToken: randomToken(), notes: [], addedEmployers: [], leads: [] };
   }
   const save = () => env.FDC_STORE.put('scan:state', JSON.stringify(state), { expirationTtl: 60 * 60 * 24 * 14 });
@@ -1514,8 +1526,8 @@ async function runJobScan(env, listings, now = new Date()) {
   if (state.phase === 'scan') {
     const employers = await getScanEmployers(env);
     // Spread the list over ~5 hourly runs so it's done well before 8am,
-    // but never more than 10 per run (Worker limits).
-    const batch = Math.min(10, Math.max(4, Math.ceil(employers.length / 5)));
+    // but never more than 12 per run (Worker limits).
+    const batch = Math.min(12, Math.max(4, Math.ceil(employers.length / 5)));
     const slice = employers.slice(state.cursor, state.cursor + batch);
     for (const emp of slice) {
       if (!emp.url) continue;
@@ -1583,6 +1595,19 @@ async function scanEmployer(emp, env) {
     if (!res.ok) throw new Error('Page ' + res.status);
     html = (await res.text()).slice(0, 250000);
     ats = detectAts(pageUrl, html);
+    // Careers sites that split jobs over several pages (e.g. Dalata).
+    if (!ats && emp.pages && emp.pages.template) {
+      const { template, from = 2, step = 1, count = 4 } = emp.pages;
+      for (let i = 0; i < Math.min(count, 8); i++) {
+        const u = cleanUrl(template.replace('{p}', String(from + i * step)));
+        if (!u) break;
+        try {
+          const r = await fetch(u, { headers: { 'User-Agent': 'DublinCoffeeJobsBot/1.0 (+https://dublincoffeejobs.com)', 'Accept': 'text/html' } });
+          if (!r.ok) break;
+          html += '\n' + (await r.text()).slice(0, 150000);
+        } catch { break; }
+      }
+    }
   }
 
   if (ats) {
@@ -1597,31 +1622,30 @@ async function scanEmployer(emp, env) {
       seen.add(href);
       const label = m[2].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80);
       links.push({ text: label, href });
-      if (links.length >= 250) break;
+      if (links.length >= 400) break;
     }
     text = html.replace(/<(script|style|noscript|svg)[\s\S]*?<\/\1>/gi, ' ').replace(/<[^>]+>/g, ' ')
-      .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ').slice(0, 30000);
+      .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ').slice(0, 45000);
   }
 
   const prompt = `You are helping a coffee and hospitality jobs board in Ireland.
 Below is the careers page of "${emp.name}" (${pageUrl}), plus the links on it.
 List the CURRENT job openings that are (a) located in Ireland and (b) front-line coffee, café, hospitality or kitchen roles: barista, head barista, café or shop manager/supervisor, team member/customer assistant in a café or coffee counter, roaster, coffee trainer, coffee/wholesale sales, waiting staff, bartender, chef, baker, kitchen porter, hotel front-of-house and similar.
 Leave out head office, IT, finance, warehouse, driving and retail roles with no café or food element. Leave out anything that is not clearly an open vacancy. If there are none, return [].
+List at most 25 roles, most coffee-focused first.
 Reply with ONLY a JSON array, no other text. Each item:
 {"title": "...", "location": "town or county", "salary": "only if stated, else empty", "type": "Full time / Part time / Contract or empty", "applyUrl": "the most specific link from the LINKS list for this role, or the careers page", "summary": "one or two plain sentences about the role, in your own words"}
 
 LINKS:
-${links.map(l => `- ${l.text} → ${l.href}`).join('\n').slice(0, 20000)}
+${links.map(l => `- ${l.text} → ${l.href}`).join('\n').slice(0, 25000)}
 
 PAGE:
 ${text}`;
 
-  const data = await callClaude(prompt, env, 3000);
+  const data = await callClaude(prompt, env, 6000);
   const reply = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
-  const start = reply.indexOf('['), end = reply.lastIndexOf(']');
-  if (start < 0 || end < start) return [];
-  let roles; try { roles = JSON.parse(reply.slice(start, end + 1)); } catch { return []; }
-  if (!Array.isArray(roles)) return [];
+  const roles = parseJsonArray(reply);
+  if (!roles.length) return [];
 
   const allowed = new Set([pageUrl, ...links.map(l => l.href)]);
   return roles.slice(0, 25).map(r => {
@@ -1726,6 +1750,20 @@ async function callClaudeWithSearch(prompt, env) {
   return text;
 }
 
+// How coffee-focused a job title is — used to pick each employer's top three.
+function coffeeScore(title) {
+  const t = String(title || '').toLowerCase();
+  if (/barista|coffee|espresso|roast/.test(t)) return 4;
+  if (/caf[eé]|deli|bakery|baker|pastry|counter|food ?hall/.test(t)) return 3;
+  if (/chef|cook|kitchen|food|f&b|beverage|waiter|waitress|server|bar|host|restaurant|breakfast/.test(t)) return 2;
+  return 1;
+}
+
+const PER_EMPLOYER = 3;
+
+// Builds the Monday email: at most three roles per employer (most coffee-
+// focused first), a one-post "They're hiring" roundup for any employer with
+// more, then employers to invite. Sent with proper buttons.
 async function sendScanEmail(state, env) {
   const base = env.WORKER_URL || 'https://cv-review.firstdraftcoffee.workers.dev';
   const drafts = [];
@@ -1733,42 +1771,127 @@ async function sendScanEmail(state, env) {
     const raw = await env.FDC_STORE.get(`scan:draft:${id}`);
     if (raw) drafts.push(JSON.parse(raw));
   }
-  const [y, m, d] = state.week.split('-');
-  const lines = [];
-  if (drafts.length) {
-    lines.push(`${drafts.length} new role${drafts.length === 1 ? '' : 's'} found on employers' own careers pages this week.`, '',
-      'Tap "Check & post" on any you want on the board — it goes live straight away and out on Instagram and Facebook. Ignore the rest; they won\'t come back.', '');
-    drafts.forEach((r, i) => {
-      lines.push(`${i + 1}. ${r.title} — ${r.employer}`,
-        `   ${[r.location, r.salary, r.type].filter(Boolean).join(' · ')}`,
-        `   Check & post: ${base}/scan/review?id=${r.id}&t=${r.token}`, '');
-    });
-    lines.push(`Post all ${drafts.length}: ${base}/scan/review-all?w=${state.week}&t=${state.allToken}`, '');
-  } else {
-    lines.push('No new roles on the watched careers pages this week.', '');
+  const groups = new Map();
+  for (const d of drafts) { if (!groups.has(d.employer)) groups.set(d.employer, []); groups.get(d.employer).push(d); }
+  const shown = [], roundups = [];
+  for (const [employer, list] of groups) {
+    list.sort((a, b) => coffeeScore(b.title) - coffeeScore(a.title));
+    shown.push(...list.slice(0, PER_EMPLOYER));
+    if (list.length > PER_EMPLOYER) {
+      const top = [...new Set(list.map(x => x.title))].slice(0, 4);
+      const places = [...new Set(list.map(x => x.location).filter(Boolean))];
+      const r = { id: crypto.randomUUID(), token: randomToken(), week: state.week, employer, count: list.length, titles: top,
+        locations: places.length > 3 ? `${places.slice(0, 3).join(', ')} and more` : places.join(', '),
+        sourceUrl: list[0].sourceUrl || list[0].applyUrl };
+      await env.FDC_STORE.put(`scan:roundup:${r.id}`, JSON.stringify(r), { expirationTtl: 60 * 60 * 24 * 14 });
+      roundups.push(r);
+    }
   }
+  state.shown = shown.map(d => d.id);
+  state.roundups = roundups.map(r => r.id);
+
   const leads = [];
   for (const id of (state.leads || [])) {
     const raw = await env.FDC_STORE.get(`scan:lead:${id}`);
     if (raw) leads.push(JSON.parse(raw));
   }
-  if (leads.length) {
-    lines.push('— — —', '',
-      `EMPLOYERS TO INVITE: ${leads.length} hiring elsewhere, not on DCJ yet.`,
-      'Tap "Send invite" and they get a short email from Dublin Coffee Jobs offering a free listing. If they tap yes, their job goes live by itself. Replies go to ' + (env.INVITE_REPLY_TO || env.ALERT_EMAIL_TO) + '.', '');
-    leads.forEach((l, i) => {
-      lines.push(`${i + 1}. ${l.employer} — ${l.role}${l.location ? ', ' + l.location : ''}`,
-        `   Email: ${l.email}${l.website ? ' · ' + l.website : ''}`,
-        `   Send invite: ${base}/scan/invite?id=${l.id}&t=${l.token}`, '');
-    });
-    lines.push(`Invite all ${leads.length}: ${base}/scan/invite-all?w=${state.week}&t=${state.allToken}`, '');
+
+  const [y, m, d] = state.week.split('-');
+  const date = `${d}/${m}/${y.slice(2)}`;
+  const employers = groups.size;
+  const esc = v => String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const btn = (href, label, ghost) => `<a href="${esc(href)}" style="display:inline-block;padding:10px 18px;border-radius:999px;font-weight:600;font-size:14px;text-decoration:none;${ghost ? 'border:1px solid #b4532a;color:#b4532a;background:#fff;' : 'background:#b4532a;color:#fff;'}">${esc(label)}</a>`;
+  const card = inner => `<div style="background:#fff;border:1px solid #e3d9cb;border-radius:12px;padding:14px 16px;margin:10px 0;">${inner}</div>`;
+  const h2 = (t, sub) => `<h2 style="font-size:18px;margin:28px 0 4px;">${esc(t)}</h2>${sub ? `<p style="margin:0 0 8px;color:#6b6157;font-size:14px;">${esc(sub)}</p>` : ''}`;
+
+  const html = [];
+  const text = [];
+  html.push(`<div style="font-family:-apple-system,Segoe UI,Helvetica,Arial,sans-serif;background:#f5efe6;padding:20px 14px;color:#161310;"><div style="max-width:560px;margin:0 auto;">
+<p style="margin:0;color:#b4532a;font-size:12px;letter-spacing:.08em;text-transform:uppercase;">Dublin Coffee Jobs · ${esc(date)}</p>
+<h1 style="font-size:22px;margin:6px 0 4px;">${shown.length ? `${shown.length} job${shown.length === 1 ? '' : 's'} from ${employers} employer${employers === 1 ? '' : 's'}` : 'No new jobs this time'}${leads.length ? ` · ${leads.length} to invite` : ''}</h1>
+<p style="margin:0;color:#6b6157;font-size:14px;">Anything you post goes on the board straight away. Its Instagram and Facebook post goes out within a few hours, one an hour.</p>`);
+  text.push(`Dublin Coffee Jobs · ${date}`, '');
+
+  if (shown.length) {
+    html.push(h2('Jobs to post', `Up to ${PER_EMPLOYER} per employer, most coffee-focused first.`));
+    text.push('JOBS TO POST', '');
+    for (const [employer, list] of groups) {
+      const top = list.slice(0, PER_EMPLOYER);
+      html.push(`<p style="margin:18px 0 0;font-weight:700;">${esc(employer)}${list.length > PER_EMPLOYER ? ` <span style="font-weight:400;color:#6b6157;">· ${list.length} roles found</span>` : ''}</p>`);
+      for (const r of top) {
+        const meta = [r.location, r.salary, r.type].filter(Boolean).join(' · ');
+        html.push(card(`<strong>${esc(r.title)}</strong><div style="color:#6b6157;font-size:14px;margin:2px 0 10px;">${esc(meta)}</div>${btn(`${base}/scan/review?id=${r.id}&t=${r.token}`, 'Check & post')}`));
+        text.push(`${r.title} — ${employer}${meta ? ' · ' + meta : ''}`, `Check & post: ${base}/scan/review?id=${r.id}&t=${r.token}`, '');
+      }
+    }
+    html.push(`<div style="margin:16px 0;">${btn(`${base}/scan/review-all?w=${state.week}&t=${state.allToken}`, `Post all ${shown.length}`)}</div>`);
+    text.push(`Post all ${shown.length}: ${base}/scan/review-all?w=${state.week}&t=${state.allToken}`, '');
   }
-  if (state.addedEmployers.length) lines.push(`Added to next week's scan: ${state.addedEmployers.join(', ')}.`, '');
-  if (state.notes.length) lines.push(...state.notes, '');
-  lines.push('Links work for 14 days.');
-  await sendEmailTo(env, env.ALERT_EMAIL_TO,
-    drafts.length ? `${drafts.length} new jobs to post — ${d}/${m}/${y.slice(2)}` : `Jobs scan — nothing new (${d}/${m}/${y.slice(2)})`,
-    lines.join('\n'));
+
+  if (roundups.length) {
+    html.push(h2('Big employers: post as one', 'Instead of lots of separate posts, put up a single "they\'re hiring" listing that links to their careers page.'));
+    text.push('BIG EMPLOYERS — POST AS ONE', '');
+    for (const r of roundups) {
+      html.push(card(`<strong>${esc(r.employer)} is hiring</strong><div style="color:#6b6157;font-size:14px;margin:2px 0 10px;">${esc(r.count)} roles${r.locations ? ' · ' + esc(r.locations) : ''}<br>including ${esc(r.titles.join(', '))}</div>${btn(`${base}/scan/roundup?id=${r.id}&t=${r.token}`, 'Post as one listing', true)}`));
+      text.push(`${r.employer} is hiring — ${r.count} roles`, `Post as one listing: ${base}/scan/roundup?id=${r.id}&t=${r.token}`, '');
+    }
+  }
+
+  if (leads.length) {
+    html.push(h2(`Employers to invite (${leads.length})`, `Hiring elsewhere but not on Dublin Coffee Jobs yet. They get one short email offering a free listing; if they tap yes, their job goes live by itself. Replies go to ${env.INVITE_REPLY_TO || env.ALERT_EMAIL_TO}.`));
+    text.push('EMPLOYERS TO INVITE', '');
+    for (const l of leads) {
+      html.push(card(`<strong>${esc(l.employer)}</strong> · ${esc(l.role)}${l.location ? ', ' + esc(l.location) : ''}<div style="color:#6b6157;font-size:14px;margin:2px 0 10px;">${esc(l.email)}</div>${btn(`${base}/scan/invite?id=${l.id}&t=${l.token}`, 'Send invite', true)}`));
+      text.push(`${l.employer} — ${l.role}${l.location ? ', ' + l.location : ''} (${l.email})`, `Send invite: ${base}/scan/invite?id=${l.id}&t=${l.token}`, '');
+    }
+    html.push(`<div style="margin:16px 0;">${btn(`${base}/scan/invite-all?w=${state.week}&t=${state.allToken}`, `Invite all ${leads.length}`)}</div>`);
+    text.push(`Invite all ${leads.length}: ${base}/scan/invite-all?w=${state.week}&t=${state.allToken}`, '');
+  }
+
+  const extras = [];
+  if (state.addedEmployers.length) extras.push(`Added to the scan: ${state.addedEmployers.join(', ')}.`);
+  extras.push(...state.notes);
+  if (extras.length) { html.push(`<div style="margin-top:24px;color:#6b6157;font-size:13px;">${extras.map(e => `<p style="margin:6px 0;">${esc(e)}</p>`).join('')}</div>`); text.push(...extras, ''); }
+  html.push(`<p style="margin-top:24px;color:#6b6157;font-size:12px;">Links work for 14 days. Nothing goes up unless you post it.</p></div></div>`);
+  text.push('Links work for 14 days.');
+
+  const subject = shown.length || leads.length
+    ? `${shown.length} jobs from ${employers} employer${employers === 1 ? '' : 's'}${leads.length ? `, ${leads.length} to invite` : ''} — ${date}`
+    : `Jobs scan — nothing new (${date})`;
+  await sendEmailHtml(env, env.ALERT_EMAIL_TO, subject, text.join('\n'), html.join('\n'));
+}
+
+async function sendEmailHtml(env, to, subject, text, html, replyTo) {
+  const payload = { from: 'Dublin Coffee Jobs <alerts@firstdraftcoffee.net>', to: [to], subject, text, html };
+  if (replyTo) payload.reply_to = replyTo;
+  try {
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) console.error('Resend HTML send FAILED:', res.status, await res.text(), 'to:', to);
+  } catch (e) { console.error('Resend HTML send threw:', String(e)); }
+}
+
+async function publishRoundup(r, env) {
+  const id = crypto.randomUUID();
+  const ttl = 14 * 24 * 60 * 60;
+  const roundupLine = `${r.count} roles${r.locations ? ' across ' + r.locations : ''}, including ${r.titles.join(', ')}`;
+  const record = {
+    id, kind: 'job', tier: 'standard', status: 'published', createdAt: Date.now(),
+    expiresAt: Date.now() + ttl * 1000, flagged: false, spotted: true, roundup: true,
+    data: {
+      title: `${r.employer} is hiring`, venue: r.employer, location: r.locations || 'Ireland',
+      salary: '', payOnSite: true, type: `${r.count} roles`, roundupLine,
+      desc: `${roundupLine}. See every role and apply on their careers page.`,
+      applyUrl: r.sourceUrl, sourceUrl: r.sourceUrl, skipScoring: true,
+    },
+  };
+  await env.FDC_STORE.put(`listing:${id}`, JSON.stringify(record), { expirationTtl: ttl });
+  await env.FDC_STORE.delete(`scan:roundup:${r.id}`);
+  await queueSocial(record, env);
+  return record;
 }
 
 async function publishDraft(draft, env, ctx) {
@@ -1815,11 +1938,10 @@ async function handleScanRoute(path, request, url, env, ctx) {
     return d.token === t ? d : null;
   };
   const loadWeek = async (w, t) => {
-    const raw = await env.FDC_STORE.get('scan:state');
-    const st = raw ? JSON.parse(raw) : null;
-    if (!st || st.week !== w || st.allToken !== t) return null;
+    const st = w ? await loadScanState(env, w) : null;
+    if (!st || st.allToken !== t) return null;
     const out = [];
-    for (const id of st.drafts) { const r = await env.FDC_STORE.get(`scan:draft:${id}`); if (r) out.push(JSON.parse(r)); }
+    for (const id of (st.shown || st.drafts)) { const r = await env.FDC_STORE.get(`scan:draft:${id}`); if (r) out.push(JSON.parse(r)); }
     return out;
   };
   const gone = () => scanPage('Already done', () => `<h1>Nothing to post here</h1><p>This one has already been posted, or the link is more than 14 days old.</p><p><a href="${site}/job-board.html">Open the job board</a></p>`);
@@ -1836,6 +1958,27 @@ async function handleScanRoute(path, request, url, env, ctx) {
     if (!d) return gone();
     const rec = await publishDraft(d, env, ctx);
     return scanPage('Posted', esc => `<h1>Posted ✓</h1><p><strong>${esc(d.title)}</strong> at ${esc(d.employer)} is live on the board. Its Instagram and Facebook post goes out within the hour.</p><p><a href="${site}/job-board.html?id=${esc(rec.id)}">See it on the board</a></p>`);
+  }
+  const loadRoundup = async (id, t) => {
+    if (!id || !t) return null;
+    const raw = await env.FDC_STORE.get(`scan:roundup:${id}`);
+    if (!raw) return null;
+    const r = JSON.parse(raw);
+    return r.token === t ? r : null;
+  };
+  if (path === '/scan/roundup' && request.method === 'GET') {
+    const r = await loadRoundup(url.searchParams.get('id'), url.searchParams.get('t'));
+    if (!r) return gone();
+    return scanPage('Post as one listing?', esc => `<h1>Post "${esc(r.employer)} is hiring"?</h1>
+<div class="card"><strong>${esc(r.employer)} is hiring</strong><div class="meta">${esc(r.count)} roles${r.locations ? ' · ' + esc(r.locations) : ''}</div><p>Including ${esc(r.titles.join(', '))}.</p><div class="meta">Applicants go to: <a href="${esc(r.sourceUrl)}" target="_blank" rel="noopener nofollow">${esc(r.sourceUrl)}</a></div></div>
+<form method="POST" action="/scan/roundup-post"><input type="hidden" name="id" value="${esc(r.id)}"><input type="hidden" name="t" value="${esc(r.token)}"><button type="submit">Post it as one listing</button></form>`);
+  }
+  if (path === '/scan/roundup-post' && request.method === 'POST') {
+    const form = await request.formData();
+    const r = await loadRoundup(form.get('id'), form.get('t'));
+    if (!r) return gone();
+    const rec = await publishRoundup(r, env);
+    return scanPage('Posted', esc => `<h1>Posted ✓</h1><p><strong>${esc(r.employer)} is hiring</strong> is live on the board. Its Instagram and Facebook post goes out within the hour.</p><p><a href="${site}/job-board.html?id=${esc(rec.id)}">See it on the board</a></p>`);
   }
   if (path === '/scan/review-all' && request.method === 'GET') {
     const w = url.searchParams.get('w'), t = url.searchParams.get('t');
@@ -1866,7 +2009,7 @@ async function handleScanRoute(path, request, url, env, ctx) {
 // ═══════════════════════════════════════════════════════════════════
 
 const GENERIC_INBOX = /^(info|hello|hi|jobs|job|careers|career|recruitment|recruit|recruiting|hr|people|work|team|contact|enquiries|enquiry|hiring|admin|office|cafe|coffee|bookings|reservations|manager|management|general|mail)([.\-_]?[a-z0-9]*)?$/i;
-const MAX_LEADS = 15;
+const MAX_LEADS = 20;
 
 function validInviteEmail(e) {
   const email = String(e || '').trim().toLowerCase();
@@ -1989,9 +2132,8 @@ async function handleInviteRoute(path, request, url, env, ctx) {
     return l.token === t ? l : null;
   };
   const loadLeads = async (w, t) => {
-    const raw = await env.FDC_STORE.get('scan:state');
-    const st = raw ? JSON.parse(raw) : null;
-    if (!st || st.week !== w || st.allToken !== t) return null;
+    const st = w ? await loadScanState(env, w) : null;
+    if (!st || st.allToken !== t) return null;
     const out = [];
     for (const id of (st.leads || [])) { const r = await env.FDC_STORE.get(`scan:lead:${id}`); if (r) out.push(JSON.parse(r)); }
     return out;
@@ -2137,7 +2279,7 @@ async function runSpottedLinkCheck(env, listings, now = Date.now()) {
   const last = parseInt((await env.FDC_STORE.get('linkcheck:lastRun')) || '0', 10);
   if (now - last < 23 * 60 * 60 * 1000) return;
   await env.FDC_STORE.put('linkcheck:lastRun', String(now));
-  const spotted = listings.filter(l => l.spotted && !l.flagged && l.data && l.data.applyUrl).slice(0, 20);
+  const spotted = listings.filter(l => l.spotted && !l.roundup && !l.flagged && l.data && l.data.applyUrl).slice(0, 20);
   const norm = s => String(s || '').toLowerCase().replace(/&amp;/g, '&').replace(/[^a-z0-9]+/g, ' ').trim();
   const removed = [];
   for (const l of spotted) {
@@ -2240,6 +2382,28 @@ async function fetchAtsOffers({ kind, id }) {
       return [...xml.matchAll(/<position>([\s\S]*?)<\/position>/g)].map(m => ({ title: tag(m[1], 'name'), location: tag(m[1], 'office'),
         type: tag(m[1], 'schedule'), link: `https://${id}.jobs.personio.de/job/${tag(m[1], 'id')}`, about: '' }));
     }
+  }
+  return [];
+}
+
+async function loadScanState(env, week) {
+  const cur = await env.FDC_STORE.get('scan:state');
+  const st = cur ? JSON.parse(cur) : null;
+  if (st && st.week === week) return st;
+  const old = await env.FDC_STORE.get(`scan:state:${week}`);
+  return old ? JSON.parse(old) : null;
+}
+
+// Reads the JSON list out of an AI reply. If the reply was cut off part-way,
+// keeps every complete item rather than losing the lot.
+function parseJsonArray(reply) {
+  const start = String(reply || '').indexOf('[');
+  if (start < 0) return [];
+  const body = reply.slice(start);
+  const end = body.lastIndexOf(']');
+  if (end > 0) { try { const v = JSON.parse(body.slice(0, end + 1)); if (Array.isArray(v)) return v; } catch {} }
+  for (let cut = body.lastIndexOf('}'); cut > 0; cut = body.lastIndexOf('}', cut - 1)) {
+    try { const v = JSON.parse(body.slice(0, cut + 1) + ']'); if (Array.isArray(v)) return v; } catch {}
   }
   return [];
 }
