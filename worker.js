@@ -1471,7 +1471,7 @@ const DEFAULT_SCAN_EMPLOYERS = [
 ];
 const SCAN_START_HOUR = 1;
 // One-off extra scan days on top of every Monday (YYYY-MM-DD, Dublin time).
-const EXTRA_SCAN_DATES = ['2026-11-03'];
+const EXTRA_SCAN_DATES = ['2026-11-03', '2026-11-04'];
 const SCAN_EMAIL_HOUR = 8;
 const BLOCKED_JOB_SITES = /(^|\.)(indeed\.|linkedin\.|jobs\.ie|irishjobs\.ie|jobsireland\.ie|glassdoor\.|ziprecruiter\.|simplyhired\.|jobijoba\.|cv-library\.|recruitireland\.|monster\.)/i;
 
@@ -1553,7 +1553,7 @@ async function runJobScan(env, listings, now = new Date()) {
       state.addedEmployers = await discoverEmployers(env);
     } catch (e) {
       console.error('Employer discovery failed:', String(e));
-      state.notes.push("Couldn't search for new employers this week.");
+      state.notes.push(`Couldn't search for new employers this time. Reason: ${String(e.message || e).slice(0, 220)}`);
     }
     state.phase = isFreeLaunch(env) ? 'leads' : 'ready';
     await save();
@@ -1565,7 +1565,7 @@ async function runJobScan(env, listings, now = new Date()) {
       state.leads = await findInviteLeads(env, listings, state);
     } catch (e) {
       console.error('Invite lead search failed:', String(e));
-      state.notes.push("Couldn't look for employers to invite this week.");
+      state.notes.push(`Couldn't look for employers to invite this time. Reason: ${String(e.message || e).slice(0, 220)}`);
     }
     state.phase = 'ready';
     await save();
@@ -1728,21 +1728,34 @@ When finished, reply with ONLY a JSON array, no other text: [{"name": "...", "ty
   return added;
 }
 
-async function callClaudeWithSearch(prompt, env) {
+// Claude with web search. Keeps each run small (few searches) so it stays
+// inside the account's per-minute limits; if a limit or a busy server is hit,
+// waits a minute and tries once more. Errors carry a short, readable reason.
+async function callClaudeWithSearch(prompt, env, maxUses = 6) {
   let messages = [{ role: 'user', content: prompt }];
   let text = '';
+  let retried = false;
   for (let round = 0; round < 3; round++) {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({
         model: 'claude-sonnet-5', max_tokens: 4000, messages,
-        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 12,
+        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: maxUses,
           user_location: { type: 'approximate', country: 'IE', city: 'Dublin', timezone: 'Europe/Dublin' } }],
       }),
     });
-    const data = await res.json();
-    if (!data.content) throw new Error('Claude API error: ' + JSON.stringify(data).slice(0, 300));
+    const raw = await res.text();
+    let data = null; try { data = JSON.parse(raw); } catch {}
+    if (!res.ok || !data || !data.content) {
+      if ((res.status === 429 || res.status === 529 || res.status >= 500) && !retried) {
+        retried = true; round--;
+        await new Promise(r => setTimeout(r, 65000));
+        continue;
+      }
+      const why = data && data.error ? `${data.error.type}: ${data.error.message}` : raw.slice(0, 120);
+      throw new Error(`AI search failed (${res.status} ${why})`.slice(0, 220));
+    }
     text = data.content.filter(b => b.type === 'text').map(b => b.text).join('');
     if (data.stop_reason !== 'pause_turn') break;
     messages = [...messages, { role: 'assistant', content: data.content }];
