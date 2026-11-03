@@ -2052,6 +2052,8 @@ const MAX_LEADS = 20;
 const MANUAL_INVITE_LEADS = [
   { employer: 'Cloud Picker Coffee', role: 'Production Assistant / Barista', location: 'Dublin',
     email: 'hello@cloudpickercoffee.ie', website: 'https://cloudpickercoffee.ie' },   // seen 03/11/26, blog post dated 07/09/26
+  { employer: 'Guji Coffee Bar', role: 'Barista', location: 'Limerick',
+    email: 'jobs@guji.ie', website: 'https://guji.ie' },   // seen 03/11/26, jobs page last updated 2022
 ];
 
 function validInviteEmail(e) {
