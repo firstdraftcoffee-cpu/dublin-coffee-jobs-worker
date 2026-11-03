@@ -1474,6 +1474,7 @@ const DEFAULT_SCAN_EMPLOYERS = [
   { name: 'Avoca', type: 'Cafés & food halls', url: 'https://avoca.com/pages/careers-at-avoca', alsoWatch: true },   // jobs load in after the page opens
   { name: 'Pinecone Coffee', type: 'Roastery & coffee shop (Monkstown)', url: 'https://pineconecoffee.ie/pages/career' },
   { name: 'Bodega (Howth)', type: 'Specialty coffee', url: 'https://www.bodega.ie/hiring' },
+  { name: 'The Bookshelf Coffee House (Cork & Kerry)', type: 'Café', url: 'https://bookshelfcoffee.com/jobs' },
   { name: 'Café Sol', type: 'Coffee shops & Dunnes kiosks', url: '', formOnly: true },
   { name: 'Coffeeangel', type: 'Specialty coffee', url: '', formOnly: true },   // careers page has no job list (checked 03/11/26)
 ];
