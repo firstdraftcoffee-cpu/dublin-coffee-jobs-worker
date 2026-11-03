@@ -1477,6 +1477,7 @@ const DEFAULT_SCAN_EMPLOYERS = [
   { name: 'The Bookshelf Coffee House (Cork & Kerry)', type: 'Café', url: 'https://bookshelfcoffee.com/jobs' },
   { name: 'Brentwood Coffee', type: 'Coffee shops', url: 'https://www.brentwoodcoffee.ie/careers' },
   { name: 'Foam Coffeehouse', type: 'Café', url: 'https://foamcoffeehouse.ie/careers-at-foam-coffeehouse/' },
+  { name: 'Mocha Beans (Galway)', type: 'Roaster, cafés & bakery', url: 'https://mochabeans.com/pages/careers' },
   { name: 'Café Sol', type: 'Coffee shops & Dunnes kiosks', url: '', formOnly: true },
   { name: 'Coffeeangel', type: 'Specialty coffee', url: '', formOnly: true },   // careers page has no job list (checked 03/11/26)
 ];
