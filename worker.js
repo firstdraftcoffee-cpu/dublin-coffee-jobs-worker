@@ -1455,7 +1455,7 @@ const DEFAULT_SCAN_EMPLOYERS = [
   // Discovery checks each for a careers page that lists actual jobs; any
   // that only have a general "send your CV" form go on the invite
   // watch list instead (see findInviteLeads).
-  ...['Póg', 'Esquires Coffee Ireland', 'Twobeans Speciality Coffee Bar (Dún Laoghaire)', "Bewley's Ireland",
+  ...['Póg', 'Esquires Coffee Ireland', "Bewley's Ireland",
     'Butlers Chocolate Café', 'Caffè Nero Ireland', 'Starbucks Ireland', "Gloria Jean's Coffees Ireland", 'AMT Coffee Ireland',
     'Joe & The Juice Ireland', '3fe Coffee', 'Two Boys Brew', 'Brother Hubbard', 'Bread 41', 'Shoe Lane Coffee',
     'Proper Order Coffee Co.', 'Kaph', 'Clement & Pekoe', 'Cloud Picker Coffee', 'Roasted Brown', 'Bear Market Coffee',
@@ -1468,6 +1468,7 @@ const DEFAULT_SCAN_EMPLOYERS = [
     pages: { template: 'https://careers.dalatahotelgroup.com/jobs?paged={p}', from: 2, step: 1, count: 5 } },
   { name: 'Boojum', type: 'Burrito restaurants', url: 'https://boojumltd.teamtailor.com/jobs' },
   { name: 'The Natural Bakery', type: 'Bakery-cafés', url: 'https://thenaturalbakery.ie/careers/' },
+  { name: 'Twobeans Speciality Coffee Bar (Dún Laoghaire)', type: 'Specialty coffee', url: 'https://www.twobeans.ie/jobs' },
   { name: 'Café Sol', type: 'Coffee shops & Dunnes kiosks', url: '', formOnly: true },
 ];
 const SCAN_START_HOUR = 1;
@@ -1506,6 +1507,12 @@ async function getScanEmployers(env) {
   // new names reach the live list without losing what discovery found.
   // Employers confirmed (02/11/26) to advertise only on job sites, not their own:
   for (const e of list) if (['insomnia coffee company', 'centra'].includes(e.name.toLowerCase()) && e.url && !e.atsChecked) { e.url = ''; e.formOnly = true; }
+  // A careers link added to the built-in list fills in a saved entry that had none.
+  const byName = new Map(list.map(e => [e.name.toLowerCase(), e]));
+  for (const d of DEFAULT_SCAN_EMPLOYERS) {
+    const e = byName.get(d.name.toLowerCase());
+    if (e && !e.url && d.url) { e.url = d.url; e.formOnly = false; if (d.pages) e.pages = d.pages; }
+  }
   const have = new Set(list.map(e => e.name.toLowerCase()));
   for (const e of DEFAULT_SCAN_EMPLOYERS) if (!have.has(e.name.toLowerCase())) list.push({ ...e });
   return list;
