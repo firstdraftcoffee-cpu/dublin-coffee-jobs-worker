@@ -1471,6 +1471,7 @@ const DEFAULT_SCAN_EMPLOYERS = [
   { name: 'Twobeans Speciality Coffee Bar (Dún Laoghaire)', type: 'Specialty coffee', url: 'https://www.twobeans.ie/jobs' },
   { name: 'Ground Coffee (Northern Ireland)', type: 'Coffee shops', url: 'https://groundcoffee.net/work-us/' },
   { name: "Bewley's Grafton Street", type: 'Café', url: 'https://bewleysgraftonstreet.com/work-with-us/' },
+  { name: 'Avoca', type: 'Cafés & food halls', url: 'https://avoca.com/pages/careers-at-avoca', alsoWatch: true },   // jobs load in after the page opens
   { name: 'Café Sol', type: 'Coffee shops & Dunnes kiosks', url: '', formOnly: true },
   { name: 'Coffeeangel', type: 'Specialty coffee', url: '', formOnly: true },   // careers page has no job list (checked 03/11/26)
 ];
