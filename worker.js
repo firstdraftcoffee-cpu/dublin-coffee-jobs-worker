@@ -1467,6 +1467,7 @@ const DEFAULT_SCAN_EMPLOYERS = [
   { name: 'Dalata Hotel Group (Clayton & Maldron hotels)', type: 'Hotels', url: 'https://careers.dalatahotelgroup.com/jobs',
     pages: { template: 'https://careers.dalatahotelgroup.com/jobs?paged={p}', from: 2, step: 1, count: 5 } },
   { name: 'Boojum', type: 'Burrito restaurants', url: 'https://boojumltd.teamtailor.com/jobs' },
+  { name: 'The Natural Bakery', type: 'Bakery-cafés', url: 'https://thenaturalbakery.ie/careers/' },
   { name: 'Café Sol', type: 'Coffee shops & Dunnes kiosks', url: '', formOnly: true },
 ];
 const SCAN_START_HOUR = 1;
