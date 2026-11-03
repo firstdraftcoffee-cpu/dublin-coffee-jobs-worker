@@ -1473,6 +1473,7 @@ const DEFAULT_SCAN_EMPLOYERS = [
   { name: "Bewley's Grafton Street", type: 'Café', url: 'https://bewleysgraftonstreet.com/work-with-us/' },
   { name: 'Avoca', type: 'Cafés & food halls', url: 'https://avoca.com/pages/careers-at-avoca', alsoWatch: true },   // jobs load in after the page opens
   { name: 'Pinecone Coffee', type: 'Roastery & coffee shop (Monkstown)', url: 'https://pineconecoffee.ie/pages/career' },
+  { name: 'Bodega (Howth)', type: 'Specialty coffee', url: 'https://www.bodega.ie/hiring' },
   { name: 'Café Sol', type: 'Coffee shops & Dunnes kiosks', url: '', formOnly: true },
   { name: 'Coffeeangel', type: 'Specialty coffee', url: '', formOnly: true },   // careers page has no job list (checked 03/11/26)
 ];
