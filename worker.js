@@ -1443,7 +1443,7 @@ async function sendAlertEmail(env, { subject, text }) {
 // ═══════════════════════════════════════════════════════════════════
 
 const DEFAULT_SCAN_EMPLOYERS = [
-  { name: 'Insomnia Coffee Company', type: 'Café chain', url: '', formOnly: true },
+  { name: 'Insomnia Coffee Company', type: 'Café chain', url: 'https://www.insomnia.ie/careers', alsoWatch: true },   // jobs load in after the page opens; also on the invite watch list
   { name: 'EUROSPAR Prendergast Group', type: 'Retail coffee counters', url: 'https://eurosparcareers.recruitee.com' },
   { name: 'Centra', type: 'Retail coffee counters (each shop hires itself)', url: '', formOnly: true },
   // No confirmed careers page yet — the discovery step looks for one.
@@ -1508,12 +1508,13 @@ async function getScanEmployers(env) {
   // Anything added to the built-in list later is merged in by name, so
   // new names reach the live list without losing what discovery found.
   // Employers confirmed (02/11/26) to advertise only on job sites, not their own:
-  for (const e of list) if (['insomnia coffee company', 'centra'].includes(e.name.toLowerCase()) && e.url && !e.atsChecked) { e.url = ''; e.formOnly = true; }
+  for (const e of list) if (e.name.toLowerCase() === 'centra' && e.url) { e.url = ''; e.formOnly = true; }
   // A careers link added to the built-in list fills in a saved entry that had none.
   const byName = new Map(list.map(e => [e.name.toLowerCase(), e]));
   for (const d of DEFAULT_SCAN_EMPLOYERS) {
     const e = byName.get(d.name.toLowerCase());
     if (e && !e.url && d.url) { e.url = d.url; e.formOnly = false; if (d.pages) e.pages = d.pages; }
+    if (e && d.alsoWatch) e.alsoWatch = true;
     if (e && d.formOnly && !d.url && e.url && /coffeeangel\.com/.test(e.url)) e.url = '';   // a found page with no job list
     if (e && !e.url && d.formOnly) e.formOnly = true;
   }
@@ -1547,6 +1548,7 @@ async function runJobScan(env, listings, now = new Date()) {
       if (!emp.url) continue;
       try {
         const roles = await scanEmployer(emp, env);
+        if (!roles.length && emp._thinPage) state.notes.push(`${emp.name}: their careers page shows no readable job list (it probably loads in after the page opens).`);
         for (const role of roles) {
           const id = await saveDraftIfNew(role, emp, listings, state, env);
           if (id) state.drafts.push(id);
@@ -1640,6 +1642,7 @@ async function scanEmployer(emp, env) {
     }
     text = html.replace(/<(script|style|noscript|svg)[\s\S]*?<\/\1>/gi, ' ').replace(/<[^>]+>/g, ' ')
       .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ').slice(0, 45000);
+    emp._thinPage = text.length < 2500;   // little readable text: jobs probably load in later
   }
 
   const prompt = `You are helping a coffee and hospitality jobs board in Ireland.
@@ -2056,7 +2059,7 @@ async function findInviteLeads(env, listings, state) {
   const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
   const onBoard = new Set(listings.filter(l => l.kind === 'job').map(l => norm(l.data && l.data.venue)));
   const scanned = employers.filter(e => e.url).map(e => e.name);
-  const watch = employers.filter(e => !e.url).map(e => e.name);
+  const watch = employers.filter(e => !e.url || e.alsoWatch).map(e => e.name);
   const prompt = `You are helping Dublin Coffee Jobs, a free Irish coffee and hospitality jobs board, invite employers to list their vacancies.
 Find up to ${MAX_LEADS} employers in Ireland that are hiring RIGHT NOW (ads from the last 3 weeks) for coffee, café, bakery, restaurant, bar or hotel front-line roles — barista, café staff, supervisor or manager, chef, waiting staff, bartender and similar. Favour independent cafés, coffee roasters, bakeries and small groups.
 You may use job sites such as Indeed, IrishJobs, Jobs.ie or LinkedIn ONLY to see who is hiring and for what role. Do not copy anything else from them.
