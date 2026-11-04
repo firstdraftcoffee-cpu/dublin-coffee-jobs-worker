@@ -1615,11 +1615,14 @@ async function scanEmployer(emp, env) {
   // link itself or from the page's code) and read its public job feed.
   let ats = detectAts(pageUrl, '');
   let html = '';
+  let offers = null;
+  if (ats) {
+    try { offers = await fetchAtsOffers(ats); } catch (e) { console.log('Job feed failed, reading the page instead:', emp.name, String(e)); ats = null; }
+  }
   if (!ats) {
-    const res = await fetch(pageUrl, { headers: { 'User-Agent': 'DublinCoffeeJobsBot/1.0 (+https://dublincoffeejobs.com)', 'Accept': 'text/html' } });
-    if (!res.ok) throw new Error('Page ' + res.status);
-    html = (await res.text()).slice(0, 250000);
+    html = await fetchPageHtml(pageUrl);
     ats = detectAts(pageUrl, html);
+    if (ats) { try { offers = await fetchAtsOffers(ats); } catch (e) { ats = null; } }
     // Careers sites that split jobs over several pages (e.g. Dalata).
     if (!ats && emp.pages && emp.pages.template) {
       const { template, from = 2, step = 1, count = 4 } = emp.pages;
@@ -1635,8 +1638,8 @@ async function scanEmployer(emp, env) {
     }
   }
 
-  if (ats) {
-    const offers = (await fetchAtsOffers(ats)).slice(0, 60);
+  if (ats && offers) {
+    offers = offers.slice(0, 60);
     text = JSON.stringify(offers);
     links = offers.map(o => ({ text: o.title, href: cleanUrl(o.link) })).filter(l => l.href);
   } else {
@@ -2378,6 +2381,7 @@ const ATS_PATTERNS = [
   ['bamboohr', /https?:\/\/([a-z0-9-]+)\.bamboohr\.com/i],
   ['smartrecruiters', /https?:\/\/(?:jobs|careers)\.smartrecruiters\.com\/([a-z0-9_-]+)/i],
   ['personio', /https?:\/\/([a-z0-9-]+)\.jobs\.personio\.(?:de|com)/i],
+  ['teamtailor', /https?:\/\/([a-z0-9-]+)\.teamtailor\.com/i],
 ];
 const ATS_SKIP = new Set(['www', 'api', 'apply', 'app', 'help', 'jobs', 'careers', 'embed', 'static', 'assets']);
 
@@ -2434,6 +2438,20 @@ async function fetchAtsOffers({ kind, id }) {
       const f = await getJson(`https://api.smartrecruiters.com/v1/companies/${id}/postings?limit=100`);
       return (f.content || []).map(j => ({ title: j.name, location: join(j.location && j.location.city, j.location && j.location.country),
         type: (j.typeOfEmployment && j.typeOfEmployment.label) || '', link: `https://jobs.smartrecruiters.com/${id}/${j.id}`, about: '' }));
+    }
+    case 'teamtailor': {
+      const r = await fetch(`https://${id}.teamtailor.com/jobs.rss`, { headers: { 'Accept': 'application/rss+xml, application/xml, text/xml',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36' } });
+      if (!r.ok) throw new Error('teamtailor feed ' + r.status);
+      const xml = await r.text();
+      const clean = v => String(v || '').replace(/<!\[CDATA\[|\]\]>/g, '').replace(/<[^>]+>/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
+      const items = [...xml.matchAll(/<item>([\s\S]*?)<\/item>/gi)].map(m => {
+        const tag = t => clean((m[1].match(new RegExp(`<${t}[^>]*>([\\s\\S]*?)</${t}>`, 'i')) || [])[1]);
+        const loc = [...m[1].matchAll(/<tt:(?:city|name)[^>]*>([\s\S]*?)<\/tt:(?:city|name)>/gi)].map(x => clean(x[1])).filter(Boolean);
+        return { title: tag('title'), location: [...new Set(loc)].join(', '), type: '', link: tag('link'), about: tag('description').slice(0, 300) };
+      }).filter(o => o.title);
+      if (!items.length && !/<rss|<channel/i.test(xml)) throw new Error('teamtailor feed empty');
+      return items;
     }
     case 'wpjm': {
       const origin = id;
@@ -2492,4 +2510,23 @@ function parseJsonArray(reply) {
     try { const v = JSON.parse(body.slice(0, cut + 1) + ']'); if (Array.isArray(v)) return v; } catch {}
   }
   return [];
+}
+
+// Fetches a careers page. Some sites give automated visitors a stripped-down
+// or blocked page, so if the first attempt is blocked or nearly empty we try
+// once more the way an ordinary browser asks for a page.
+async function fetchPageHtml(url) {
+  const readable = h => h.replace(/<(script|style|noscript|svg)[\s\S]*?<\/\1>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().length;
+  let res = await fetch(url, { headers: { 'User-Agent': 'DublinCoffeeJobsBot/1.0 (+https://dublincoffeejobs.com)', 'Accept': 'text/html' } });
+  let html = res.ok ? (await res.text()).slice(0, 250000) : '';
+  if (!res.ok || readable(html) < 2500) {
+    try {
+      const r2 = await fetch(url, { headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8', 'Accept-Language': 'en-IE,en;q=0.9' } });
+      if (r2.ok) { const h2 = (await r2.text()).slice(0, 250000); if (readable(h2) > readable(html)) { html = h2; res = r2; } }
+    } catch {}
+  }
+  if (!html && !res.ok) throw new Error('Page ' + res.status);
+  return html;
 }
