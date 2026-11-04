@@ -1447,7 +1447,7 @@ const DEFAULT_SCAN_EMPLOYERS = [
   { name: 'EUROSPAR Prendergast Group', type: 'Retail coffee counters', url: 'https://eurosparcareers.recruitee.com' },
   { name: 'Centra', type: 'Retail coffee counters (each shop hires itself)', url: '', formOnly: true },
   // No confirmed careers page yet — the discovery step looks for one.
-  ...['BaxterStorey', 'Compass Group Ireland (Gather & Gather)', 'CH&CO', 'Aramark Ireland', 'Sodexo Ireland',
+  ...['BaxterStorey', 'CH&CO', 'Aramark Ireland', 'Sodexo Ireland',
     'Costa Coffee Ireland', 'Eclective Hospitality Group', 'Java Republic', "Brady's Coffee",
     'Velo Coffee Roasters', 'Flat Coffee', 'Imbibe Coffee Roasters', 'Soma Coffee Company']
     .map(name => ({ name, type: '', url: '' })),
@@ -1478,6 +1478,7 @@ const DEFAULT_SCAN_EMPLOYERS = [
   { name: 'Brentwood Coffee', type: 'Coffee shops', url: 'https://www.brentwoodcoffee.ie/careers' },
   { name: 'Foam Coffeehouse', type: 'Café', url: 'https://foamcoffeehouse.ie/careers-at-foam-coffeehouse/' },
   { name: 'Mocha Beans (Galway)', type: 'Roaster, cafés & bakery', url: 'https://mochabeans.com/pages/careers' },
+  { name: 'Compass Group Ireland (Gather & Gather)', type: 'Contract catering', url: 'https://jobs.compass-group.co.uk/compass-ireland', alsoWatch: true },   // runs on inploi, jobs load in later — likely unreadable
   { name: 'Scéal Bakery', type: 'Bakery', url: 'https://www.scealbakery.com/careers', alsoWatch: true },   // not checked by hand (link too long to open); email flags it if unreadable
   { name: 'Café Sol', type: 'Coffee shops & Dunnes kiosks', url: '', formOnly: true },
   { name: 'Coffeeangel', type: 'Specialty coffee', url: '', formOnly: true },   // careers page has no job list (checked 03/11/26)
