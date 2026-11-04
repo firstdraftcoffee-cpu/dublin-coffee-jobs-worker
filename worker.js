@@ -1770,8 +1770,8 @@ async function callClaudeWithSearch(prompt, env, maxUses = 6) {
       headers: { 'Content-Type': 'application/json', 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({
         model: 'claude-sonnet-5', max_tokens: 4000, messages,
-        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: maxUses,
-          user_location: { type: 'approximate', country: 'IE', city: 'Dublin', timezone: 'Europe/Dublin' } }],
+        // No location setting: Ireland isn't a supported country for it, and the prompts already ask for Irish employers.
+        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: maxUses }],
       }),
     });
     const raw = await res.text();
