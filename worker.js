@@ -1447,7 +1447,7 @@ const DEFAULT_SCAN_EMPLOYERS = [
   { name: 'EUROSPAR Prendergast Group', type: 'Retail coffee counters', url: 'https://eurosparcareers.recruitee.com' },
   { name: 'Centra', type: 'Retail coffee counters (each shop hires itself)', url: '', formOnly: true },
   // No confirmed careers page yet — the discovery step looks for one.
-  ...['BaxterStorey', 'CH&CO', 'Aramark Ireland', 'Sodexo Ireland',
+  ...['CH&CO', 'Aramark Ireland', 'Sodexo Ireland',
     'Costa Coffee Ireland', 'Eclective Hospitality Group', 'Java Republic', "Brady's Coffee",
     'Velo Coffee Roasters', 'Flat Coffee', 'Imbibe Coffee Roasters', 'Soma Coffee Company']
     .map(name => ({ name, type: '', url: '' })),
@@ -1478,6 +1478,7 @@ const DEFAULT_SCAN_EMPLOYERS = [
   { name: 'Brentwood Coffee', type: 'Coffee shops', url: 'https://www.brentwoodcoffee.ie/careers' },
   { name: 'Foam Coffeehouse', type: 'Café', url: 'https://foamcoffeehouse.ie/careers-at-foam-coffeehouse/' },
   { name: 'Mocha Beans (Galway)', type: 'Roaster, cafés & bakery', url: 'https://mochabeans.com/pages/careers' },
+  { name: 'BaxterStorey', type: 'Contract catering', url: 'https://baxterstorey.ie/begin-your-story/' },   // SmartRecruiters (shared UK account, Irish jobs only)
   { name: 'Compass Group Ireland (Gather & Gather)', type: 'Contract catering', url: 'https://jobs.compass-group.co.uk/compass-ireland', alsoWatch: true },   // runs on inploi, jobs load in later — likely unreadable
   { name: 'Scéal Bakery', type: 'Bakery', url: 'https://www.scealbakery.com/careers', alsoWatch: true },   // not checked by hand (link too long to open); email flags it if unreadable
   { name: 'Café Sol', type: 'Coffee shops & Dunnes kiosks', url: '', formOnly: true },
@@ -2437,7 +2438,8 @@ async function fetchAtsOffers({ kind, id }) {
         type: j.employmentStatusLabel || '', link: `https://${id}.bamboohr.com/careers/${j.id}`, about: '' }));
     }
     case 'smartrecruiters': {
-      const f = await getJson(`https://api.smartrecruiters.com/v1/companies/${id}/postings?limit=100`);
+      // Irish jobs only: some accounts (e.g. BaxterStorey's parent) cover the UK too.
+      const f = await getJson(`https://api.smartrecruiters.com/v1/companies/${id}/postings?limit=100&country=ie`);
       return (f.content || []).map(j => ({ title: j.name, location: join(j.location && j.location.city, j.location && j.location.country),
         type: (j.typeOfEmployment && j.typeOfEmployment.label) || '', link: `https://jobs.smartrecruiters.com/${id}/${j.id}`, about: '' }));
     }
