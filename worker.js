@@ -902,6 +902,14 @@ Brew method: ${method}. Problem: ${issue}`;
     await runDigestJob(env, listings);
     await runRenewalReminderJob(env, listings);
 
+    // One-off removals Ger asked for (hidden from the board, not deleted, so they can be restored).
+    for (const l of listings) {
+      if (l.kind === 'job' && !l.flagged && /pinecone/i.test((l.data && l.data.venue) || '')) {   // 05/11/26: old Pinecone job
+        l.flagged = true; l.flagReason = 'Removed at owner request (old job)';
+        await env.FDC_STORE.put(`listing:${l.id}`, JSON.stringify(l), l.expiresAt ? { expiration: Math.max(Math.floor(l.expiresAt / 1000), Math.floor(Date.now() / 1000) + 120) } : undefined);
+      }
+    }
+
     // Monday jobs scan — does a small slice each hour (see runJobScan).
     try { await runJobScan(env, listings); } catch (e) { console.error('Job scan error:', String(e)); }
     try { await runSocialQueue(env, ctx); } catch (e) { console.error('Social queue error:', String(e)); }
