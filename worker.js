@@ -1472,7 +1472,6 @@ const DEFAULT_SCAN_EMPLOYERS = [
   { name: 'Ground Coffee (Northern Ireland)', type: 'Coffee shops', url: 'https://groundcoffee.net/work-us/' },
   { name: "Bewley's Grafton Street", type: 'Café', url: 'https://bewleysgraftonstreet.com/work-with-us/' },
   { name: 'Avoca', type: 'Cafés & food halls', url: 'https://avoca.com/pages/careers-at-avoca', alsoWatch: true },   // jobs load in after the page opens
-  { name: 'Pinecone Coffee', type: 'Roastery & coffee shop (Monkstown)', url: 'https://pineconecoffee.ie/pages/career' },
   { name: 'Bodega (Howth)', type: 'Specialty coffee', url: 'https://www.bodega.ie/hiring' },
   { name: 'The Bookshelf Coffee House (Cork & Kerry)', type: 'Café', url: 'https://bookshelfcoffee.com/jobs' },
   { name: 'Brentwood Coffee', type: 'Coffee shops', url: 'https://www.brentwoodcoffee.ie/careers' },
@@ -1520,6 +1519,9 @@ async function getScanEmployers(env) {
   // new names reach the live list without losing what discovery found.
   // Employers confirmed (02/11/26) to advertise only on job sites, not their own:
   for (const e of list) if (e.name.toLowerCase() === 'centra' && e.url) { e.url = ''; e.formOnly = true; }
+  // Taken off the scan at Ger's request (05/11/26: Pinecone's careers page shows an old job).
+  const REMOVED = ['pinecone coffee'];
+  for (let i = list.length - 1; i >= 0; i--) if (REMOVED.includes(list[i].name.toLowerCase())) list.splice(i, 1);
   // A careers link added to the built-in list fills in a saved entry that had none.
   const byName = new Map(list.map(e => [e.name.toLowerCase(), e]));
   for (const d of DEFAULT_SCAN_EMPLOYERS) {
