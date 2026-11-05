@@ -2084,15 +2084,15 @@ async function findInviteLeads(env, listings, state) {
   const scanned = employers.filter(e => e.url).map(e => e.name);
   const watch = employers.filter(e => !e.url || e.alsoWatch).map(e => e.name);
   const prompt = `You are helping Dublin Coffee Jobs, a free Irish coffee and hospitality jobs board, invite employers to list their vacancies.
-Find up to ${MAX_LEADS} employers in Ireland that are hiring RIGHT NOW (ads from the last 3 weeks) for coffee, café, bakery, restaurant, bar or hotel front-line roles — barista, café staff, supervisor or manager, chef, waiting staff, bartender and similar. Favour independent cafés, coffee roasters, bakeries and small groups.
+Find as many as you can, up to ${MAX_LEADS}, employers in Ireland that are hiring RIGHT NOW (ads from the last 3 weeks) for coffee, café, bakery, restaurant, bar or hotel front-line roles — barista, café staff, supervisor or manager, chef, waiting staff, bartender and similar. Favour independent cafés, coffee roasters, bakeries and small groups.
 You may use job sites such as Indeed, IrishJobs, Jobs.ie or LinkedIn ONLY to see who is hiring and for what role. Do not copy anything else from them.
-For each employer, find a GENERAL contact email published on the employer's OWN website (e.g. info@, hello@, jobs@, careers@). Never use a named person's email address, and never guess an address. Skip the employer if you can't find one.
+Work efficiently: use job-site searches to collect several hiring employers at once, then find each one's GENERAL contact email published on the employer's OWN website (e.g. info@, hello@, jobs@, careers@). Never use a named person's email address, and never guess an address. Skip the employer if you can't find one.
 Check these first, and include any that are hiring now: ${watch.join('; ')}.
 Skip recruitment agencies and these employers: ${scanned.join('; ')}.
 Reply with ONLY a JSON array, no other text: [{"employer": "...", "role": "job title", "location": "town or county", "email": "...", "website": "https://their own site"}]`;
   let found = [];
   try {
-    found = parseJsonArray(await callClaudeWithSearch(prompt, env));
+    found = parseJsonArray(await callClaudeWithSearch(prompt, env, 15));
   } catch (e) {
     state.notes.push(`Couldn't look for employers to invite this time. Reason: ${String(e.message || e).slice(0, 220)}`);
   }
