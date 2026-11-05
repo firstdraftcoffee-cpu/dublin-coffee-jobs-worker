@@ -513,6 +513,12 @@ Brew method: ${method}. Problem: ${issue}`;
         return jsonResponse({ record }, 200, ALLOWED_ORIGIN);
       }
 
+      // Counts clicks on "Apply on their site" (for the weekly numbers).
+      if (path === '/stats/click' && request.method === 'POST') {
+        ctx.waitUntil(bumpStat(env, 'applyClicks'));
+        return jsonResponse({ ok: true }, 200, ALLOWED_ORIGIN);
+      }
+
       if (path === '/listings/view' && request.method === 'POST') {
         const { id } = await request.json();
         if (!id) return jsonResponse({ error: 'Missing id' }, 400, ALLOWED_ORIGIN);
@@ -747,6 +753,7 @@ Brew method: ${method}. Problem: ${issue}`;
           await sendEmailTo(env, employerEmail, subject, text, candidateEmail);
         }
         ctx.waitUntil(sendApplicationConfirmation({ candidateEmail, name, jobTitle, score, highlights }, env));
+        ctx.waitUntil(bumpStat(env, 'applications'));
         return jsonResponse({ sent: true, score }, 200, ALLOWED_ORIGIN);
       }
 
@@ -1611,6 +1618,7 @@ async function runJobScan(env, listings, now = new Date()) {
   }
 
   if (state.phase === 'ready' && t.hour >= SCAN_EMAIL_HOUR) {
+    try { state.numbers = await weeklyNumbers(env, listings); } catch (e) { state.numbers = null; }
     await sendScanEmail(state, env);
     state.phase = 'emailed';
     await save();
@@ -1877,6 +1885,12 @@ async function sendScanEmail(state, env) {
 <h1 style="font-size:22px;margin:6px 0 4px;">${shown.length ? `${shown.length} job${shown.length === 1 ? '' : 's'} from ${employers} employer${employers === 1 ? '' : 's'}` : 'No new jobs this time'}${leads.length ? ` · ${leads.length} to invite` : ''}</h1>
 <p style="margin:0;color:#6b6157;font-size:14px;">Anything you post goes on the board straight away. Its Instagram and Facebook post goes out within a few hours, one an hour.</p>`);
   text.push(`Dublin Coffee Jobs · ${date}`, '');
+  const n = state.numbers;
+  if (n) {
+    const cell = (v, l) => `<td style="padding:10px 8px;text-align:center;"><div style="font-size:22px;font-weight:700;color:#b4532a;">${esc(v)}</div><div style="font-size:12px;color:#6b6157;">${esc(l)}</div></td>`;
+    html.push(`<div style="background:#fff;border:1px solid #e3d9cb;border-radius:12px;margin:16px 0 0;"><p style="margin:10px 12px 0;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:#6b6157;">Last 7 days</p><table role="presentation" style="width:100%;border-collapse:collapse;"><tr>${cell(n.newListings, 'new listings')}${cell(n.applications, 'applications sent')}${cell(n.applyClicks, 'clicks to employer sites')}</tr><tr>${cell(n.liveListings, 'live on the board')}${cell(n.views, 'listing views')}<td></td></tr></table></div>`);
+    text.push(`Last 7 days: ${n.newListings} new listings · ${n.applications} applications sent · ${n.applyClicks} clicks to employer sites · ${n.liveListings} live · ${n.views} listing views`, '');
+  }
 
   if (shown.length) {
     html.push(h2('Jobs to post', `Up to ${PER_EMPLOYER} per employer, most coffee-focused first.`));
@@ -2592,4 +2606,37 @@ async function readBuilderData(pageUrl, html) {
   }
   if (bits.length) out.text += '\n' + [...new Set(bits)].join(' · ').slice(0, 15000);
   return out;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// WEEKLY NUMBERS — small daily counters (applications sent through the
+// site, clicks to employers' own sites) for the "last 7 days" summary at
+// the top of each scan email. Kept for 400 days for the sponsor pack.
+// KV: stats:<YYYY-MM-DD> (Dublin date) → { applications, applyClicks }
+// ═══════════════════════════════════════════════════════════════════
+async function bumpStat(env, field) {
+  try {
+    const key = `stats:${dublinNow().date}`;
+    const raw = await env.FDC_STORE.get(key);
+    const st = raw ? JSON.parse(raw) : {};
+    st[field] = (st[field] || 0) + 1;
+    await env.FDC_STORE.put(key, JSON.stringify(st), { expirationTtl: 60 * 60 * 24 * 400 });
+  } catch (e) { console.error('stat bump failed', String(e)); }
+}
+
+async function weeklyNumbers(env, listings, now = Date.now()) {
+  const totals = { applications: 0, applyClicks: 0 };
+  for (let i = 0; i < 7; i++) {
+    const day = dublinNow(new Date(now - i * 864e5)).date;
+    const raw = await env.FDC_STORE.get(`stats:${day}`);
+    if (raw) { const st = JSON.parse(raw); totals.applications += st.applications || 0; totals.applyClicks += st.applyClicks || 0; }
+  }
+  const live = listings.filter(l => !l.flagged && l.status === 'published');
+  const newOnes = live.filter(l => l.createdAt > now - 7 * 864e5);
+  let views = 0;
+  for (const l of live.slice(0, 200)) {
+    const v = await env.FDC_STORE.get(`views:${l.id}`);
+    if (v) views += parseInt(v, 10) || 0;
+  }
+  return { newListings: newOnes.length, liveListings: live.length, views, ...totals };
 }
