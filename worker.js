@@ -1658,6 +1658,17 @@ async function scanEmployer(emp, env) {
     text = html.replace(/<(script|style|noscript|svg)[\s\S]*?<\/\1>/gi, ' ').replace(/<[^>]+>/g, ' ')
       .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ').slice(0, 45000);
     emp._thinPage = text.length < 2500;   // little readable text: jobs probably load in later
+    if (emp._thinPage) {
+      // Website builders often hold the page's content as data rather than
+      // visible text. Try their data versions before giving up.
+      const extra = await readBuilderData(pageUrl, html);
+      if (extra.links.length) {
+        const seenLinks = new Set(links.map(l => l.href));
+        for (const l of extra.links) if (!seenLinks.has(l.href)) { links.push(l); seenLinks.add(l.href); }
+      }
+      if (extra.text) text = (text + '\n' + extra.text).slice(0, 45000);
+      emp._thinPage = text.length < 2500;
+    }
   }
 
   const prompt = `You are helping a coffee and hospitality jobs board in Ireland.
@@ -2533,4 +2544,42 @@ async function fetchPageHtml(url) {
   }
   if (!html && !res.ok) throw new Error('Page ' + res.status);
   return html;
+}
+
+// Extra content for careers pages built with website builders. Squarespace
+// publishes every page as data (?format=json), including the posts of a
+// listing page; most builders (Wix, Squarespace, Shopify…) also embed the
+// page's content as data inside the page itself.
+async function readBuilderData(pageUrl, html) {
+  const out = { text: '', links: [] };
+  const strip = h => String(h || '').replace(/<(script|style)[\s\S]*?<\/\1>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
+  let origin = ''; try { origin = new URL(pageUrl).origin; } catch {}
+  if (/squarespace/i.test(html) || /#block-[0-9a-f]{24}/i.test(pageUrl)) {
+    try {
+      const u = new URL(pageUrl); u.hash = ''; u.searchParams.set('format', 'json');
+      const r = await fetch(u.href, { headers: { 'Accept': 'application/json' } });
+      if (r.ok) {
+        const j = await r.json();
+        const items = Array.isArray(j.items) ? j.items : [];
+        for (const it of items.slice(0, 50)) {
+          const href = cleanUrl(it.fullUrl ? new URL(it.fullUrl, origin).href : '');
+          if (it.title) {
+            out.text += `\n${it.title}${it.excerpt ? ' — ' + strip(it.excerpt).slice(0, 300) : ''}`;
+            if (href) out.links.push({ text: String(it.title).slice(0, 80), href });
+          }
+        }
+        if (j.mainContent) out.text += '\n' + strip(j.mainContent).slice(0, 20000);
+      }
+    } catch {}
+  }
+  // Text held as data inside the page (JSON in script tags).
+  const bits = [];
+  for (const m of String(html).matchAll(/<script[^>]*type=["']application\/(?:ld\+)?json["'][^>]*>([\s\S]*?)<\/script>/gi)) {
+    for (const v of m[1].matchAll(/"(?:title|name|text|description|headline|label)"\s*:\s*"((?:[^"\\]|\\.){3,400})"/g)) {
+      const t = v[1].replace(/\\n/g, ' ').replace(/\\u002F/gi, '/').replace(/\\"/g, '"').replace(/<[^>]+>/g, ' ').trim();
+      if (t && !/^https?:/.test(t)) bits.push(t);
+    }
+  }
+  if (bits.length) out.text += '\n' + [...new Set(bits)].join(' · ').slice(0, 15000);
+  return out;
 }
