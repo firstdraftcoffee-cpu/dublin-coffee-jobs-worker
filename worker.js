@@ -909,20 +909,6 @@ Brew method: ${method}. Problem: ${issue}`;
     await runDigestJob(env, listings);
     await runRenewalReminderJob(env, listings);
 
-    // One-off (06/11/26): the old filled-role check could delete live jobs. Clear the
-    // "already offered" memory once so Saturday's bonus scan offers them again.
-    try {
-      if (!(await env.FDC_STORE.get('migration:reoffer-20261106'))) {
-        let cursor;
-        do {
-          const page = await env.FDC_STORE.list({ prefix: 'scan:seen:', cursor });
-          for (const k of page.keys) await env.FDC_STORE.delete(k.name);
-          cursor = page.list_complete ? null : page.cursor;
-        } while (cursor);
-        await env.FDC_STORE.put('migration:reoffer-20261106', '1');
-      }
-    } catch (e) { console.error('reoffer migration failed', String(e)); }
-
     // One-off removals Ger asked for (hidden from the board, not deleted, so they can be restored).
     for (const l of listings) {
       if (l.kind === 'job' && !l.flagged && /pinecone/i.test((l.data && l.data.venue) || '')) {   // 05/11/26: old Pinecone job
@@ -1514,7 +1500,7 @@ const DEFAULT_SCAN_EMPLOYERS = [
 ];
 const SCAN_START_HOUR = 1;
 // One-off extra scan days on top of every Monday (YYYY-MM-DD, Dublin time).
-const EXTRA_SCAN_DATES = ['2026-11-03', '2026-11-04', '2026-11-07'];
+const EXTRA_SCAN_DATES = ['2026-11-03', '2026-11-04'];
 // Regular scan days (Dublin time): email lands around 8am.
 const SCAN_DAYS = ['Mon', 'Thu'];
 const SCAN_EMAIL_HOUR = 8;
