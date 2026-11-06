@@ -909,6 +909,20 @@ Brew method: ${method}. Problem: ${issue}`;
     await runDigestJob(env, listings);
     await runRenewalReminderJob(env, listings);
 
+    // One-off (06/11/26): the old filled-role check could delete live jobs. Clear the
+    // "already offered" memory once so Saturday's bonus scan offers them again.
+    try {
+      if (!(await env.FDC_STORE.get('migration:reoffer-20261106'))) {
+        let cursor;
+        do {
+          const page = await env.FDC_STORE.list({ prefix: 'scan:seen:', cursor });
+          for (const k of page.keys) await env.FDC_STORE.delete(k.name);
+          cursor = page.list_complete ? null : page.cursor;
+        } while (cursor);
+        await env.FDC_STORE.put('migration:reoffer-20261106', '1');
+      }
+    } catch (e) { console.error('reoffer migration failed', String(e)); }
+
     // One-off removals Ger asked for (hidden from the board, not deleted, so they can be restored).
     for (const l of listings) {
       if (l.kind === 'job' && !l.flagged && /pinecone/i.test((l.data && l.data.venue) || '')) {   // 05/11/26: old Pinecone job
@@ -1500,7 +1514,7 @@ const DEFAULT_SCAN_EMPLOYERS = [
 ];
 const SCAN_START_HOUR = 1;
 // One-off extra scan days on top of every Monday (YYYY-MM-DD, Dublin time).
-const EXTRA_SCAN_DATES = ['2026-11-03', '2026-11-04'];
+const EXTRA_SCAN_DATES = ['2026-11-03', '2026-11-04', '2026-11-07'];
 // Regular scan days (Dublin time): email lands around 8am.
 const SCAN_DAYS = ['Mon', 'Thu'];
 const SCAN_EMAIL_HOUR = 8;
@@ -2378,31 +2392,48 @@ async function runSpottedLinkCheck(env, listings, now = Date.now()) {
   if (now - last < 23 * 60 * 60 * 1000) return;
   await env.FDC_STORE.put('linkcheck:lastRun', String(now));
   const spotted = listings.filter(l => l.spotted && !l.roundup && !l.flagged && l.data && l.data.applyUrl).slice(0, 20);
-  const norm = s => String(s || '').toLowerCase().replace(/&amp;/g, '&').replace(/[^a-z0-9]+/g, ' ').trim();
-  const removed = [];
+  const words = s => String(s || '').toLowerCase().replace(/&amp;/g, '&').replace(/[^a-z0-9]+/g, ' ').split(' ').filter(w => w.length >= 4);
+  const BROWSER = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36', 'Accept': 'text/html' };
+  const hidden = [];
   for (const l of spotted) {
     let gone = false;
     try {
-      const res = await fetch(l.data.applyUrl, { headers: { 'User-Agent': 'DublinCoffeeJobsBot/1.0 (+https://dublincoffeejobs.com)', 'Accept': 'text/html' }, redirect: 'follow' });
-      if (res.status === 404 || res.status === 410) gone = true;
-      else if (res.ok && l.data.applyUrl === l.data.sourceUrl) {
-        // Link is the general careers page, so check the job is still listed on it.
-        const text = norm((await res.text()).slice(0, 250000).replace(/<[^>]+>/g, ' '));
-        if (!text.includes(norm(l.data.title))) {
-          const missKey = `linkcheck:miss:${l.id}`;
-          if (await env.FDC_STORE.get(missKey)) gone = true;
-          else await env.FDC_STORE.put(missKey, '1', { expirationTtl: 60 * 60 * 24 * 3 });
+      // 1) The job's own page has gone — confirmed by asking twice, the second time as a browser.
+      if (l.data.applyUrl !== l.data.sourceUrl) {
+        const r1 = await fetch(l.data.applyUrl, { headers: { 'User-Agent': 'DublinCoffeeJobsBot/1.0 (+https://dublincoffeejobs.com)', 'Accept': 'text/html' }, redirect: 'follow' });
+        if (r1.status === 404 || r1.status === 410) {
+          const r2 = await fetch(l.data.applyUrl, { headers: BROWSER, redirect: 'follow' });
+          if (r2.status === 404 || r2.status === 410) gone = true;
+        }
+      } else {
+        // 2) Only a general careers page to go on: check the job is still mentioned —
+        //    but only when the page is properly readable, matching on the title's
+        //    main words (titles get reworded), and only after 3 misses in a row.
+        let html = await fetchPageHtml(l.data.applyUrl);
+        let text = html.replace(/<(script|style|noscript|svg)[\s\S]*?<\/\1>/gi, ' ').replace(/<[^>]+>/g, ' ');
+        if (text.replace(/\s+/g, ' ').length < 2500) { const extra = await readBuilderData(l.data.applyUrl, html); text += ' ' + extra.text; }
+        const pageWords = new Set(words(text));
+        const titleWords = words(l.data.title);
+        const readable = pageWords.size > 150;
+        const found = !titleWords.length || titleWords.filter(w => pageWords.has(w)).length / titleWords.length >= 0.6;
+        const missKey = `linkcheck:miss:${l.id}`;
+        if (!readable || found) {
+          await env.FDC_STORE.delete(missKey);
         } else {
-          await env.FDC_STORE.delete(`linkcheck:miss:${l.id}`);
+          const misses = parseInt((await env.FDC_STORE.get(missKey)) || '0', 10) + 1;
+          if (misses >= 3) gone = true;
+          else await env.FDC_STORE.put(missKey, String(misses), { expirationTtl: 60 * 60 * 24 * 5 });
         }
       }
     } catch (e) { /* site down or slow — try again tomorrow */ }
     if (gone) {
-      await env.FDC_STORE.delete(`listing:${l.id}`);
-      removed.push(`${l.data.title} — ${l.data.venue}`);
+      // Hidden, not deleted — can be brought back from the admin page or a report email's Restore link.
+      l.flagged = true; l.autoHidden = true; l.flagReason = 'Job no longer on the employer’s site (automatic check)';
+      await putListing(env, l);
+      hidden.push(`${l.data.title} — ${l.data.venue}`);
     }
   }
-  if (removed.length) console.log('Removed filled roles:', removed.join('; '));
+  if (hidden.length) console.log('Hid filled roles:', hidden.join('; '));
 }
 
 // ═══════════════════════════════════════════════════════════════════
