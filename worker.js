@@ -1501,8 +1501,8 @@ const DEFAULT_SCAN_EMPLOYERS = [
 const SCAN_START_HOUR = 1;
 // One-off extra scan days on top of every Monday (YYYY-MM-DD, Dublin time).
 const EXTRA_SCAN_DATES = ['2026-11-03', '2026-11-04'];
-// Regular scan days (Dublin time): email lands around 8am.
-const SCAN_DAYS = ['Mon', 'Thu'];
+// Regular scan days (Dublin time): scans overnight, email lands around 8am Tue & Fri.
+const SCAN_DAYS = ['Tue', 'Fri'];
 const SCAN_EMAIL_HOUR = 8;
 const BLOCKED_JOB_SITES = /(^|\.)(indeed\.|linkedin\.|jobs\.ie|irishjobs\.ie|jobsireland\.ie|glassdoor\.|ziprecruiter\.|simplyhired\.|jobijoba\.|cv-library\.|recruitireland\.|monster\.)/i;
 
@@ -1551,7 +1551,7 @@ async function getScanEmployers(env) {
   return list;
 }
 
-// Called on every cron run; does nothing outside scan days (Mon, Thu, extras).
+// Called on every cron run; does nothing outside scan days (Tue, Fri, extras).
 async function runJobScan(env, listings, now = new Date()) {
   if (!env.ANTHROPIC_API_KEY || !env.ALERT_EMAIL_TO) return;
   const t = dublinNow(now);
