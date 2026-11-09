@@ -2097,6 +2097,8 @@ const MANUAL_INVITE_LEADS = [
     email: 'hello@cloudpickercoffee.ie', website: 'https://cloudpickercoffee.ie' },   // seen 03/11/26, blog post dated 07/09/26
   { employer: 'Guji Coffee Bar', role: 'Barista', location: 'Limerick',
     email: 'jobs@guji.ie', website: 'https://guji.ie' },   // seen 03/11/26, jobs page last updated 2022
+  { employer: 'Roasted Notes', role: 'Café Assistant Manager', location: 'Swords Pavilions, Co. Dublin',
+    email: 'hradmin@ksg.ie', website: 'https://www.roastednotes.ie' },   // seen 09/11/26, careers page has no date
 ];
 
 function validInviteEmail(e) {
