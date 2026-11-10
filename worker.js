@@ -2184,20 +2184,28 @@ Don't want any emails from us? ${base}/invite/stop?id=${inv.id}&t=${inv.token}`;
 }
 
 async function sendInvite(lead, env) {
-  if (await isOptedOut(lead.email, env) || await env.FDC_STORE.get(`invite:sent:${lead.email}`)) {
+  if (await isOptedOut(lead.email, env)) {
     await env.FDC_STORE.delete(`scan:lead:${lead.id}`);
-    return false;
+    return 'they asked not to be emailed';
+  }
+  const prev = await env.FDC_STORE.get(`invite:sent:${lead.email}`);
+  if (prev) {
+    await env.FDC_STORE.delete(`scan:lead:${lead.id}`);
+    const when = /^\d{13}$/.test(prev) ? new Date(parseInt(prev, 10)) : null;
+    if (!when) return 'already invited recently';
+    const t = dublinNow(when).date.split('-');
+    return `already invited on ${t[2]}/${t[1]}/${t[0].slice(2)}`;
   }
   const inv = { id: crypto.randomUUID(), token: randomToken(), employer: lead.employer, role: lead.role,
     location: lead.location, email: lead.email, website: lead.website, sentAt: Date.now() };
   await env.FDC_STORE.put(`invite:${inv.id}`, JSON.stringify(inv), { expirationTtl: 60 * 60 * 24 * 30 });
-  await env.FDC_STORE.put(`invite:sent:${lead.email}`, '1', { expirationTtl: 60 * 60 * 24 * 90 });
+  await env.FDC_STORE.put(`invite:sent:${lead.email}`, String(Date.now()), { expirationTtl: 60 * 60 * 24 * 90 });
   // Keeps the "don't email me again" link working for a year, after the invite itself expires.
   await env.FDC_STORE.put(`invite:stop:${inv.id}`, JSON.stringify({ token: inv.token, email: lead.email }), { expirationTtl: 60 * 60 * 24 * 365 });
   await env.FDC_STORE.delete(`scan:lead:${lead.id}`);
   await sendEmailTo(env, lead.email, `Your ${lead.role} vacancy: free listing on Dublin Coffee Jobs?`,
     inviteEmailText(lead, inv, env), env.INVITE_REPLY_TO || env.ALERT_EMAIL_TO);
-  return true;
+  return 'sent';
 }
 
 function inviteForm(esc, inv, error, v) {
@@ -2261,10 +2269,10 @@ async function handleInviteRoute(path, request, url, env, ctx) {
     const form = await request.formData();
     const l = await loadLead(form.get('id'), form.get('t'));
     if (!l) return sentAlready();
-    const sent = await sendInvite(l, env);
-    return scanPage('Sent', esc => sent
+    const result = await sendInvite(l, env);
+    return scanPage('Sent', esc => result === 'sent'
       ? `<h1>Invite sent ✓</h1><p>${esc(l.employer)} has been invited. If they tap yes, their job goes live and you'll get the usual "Paste into the DCJ Group" email.</p>`
-      : `<h1>Skipped</h1><p>${esc(l.employer)} has already been invited recently or asked not to be emailed.</p>`);
+      : `<h1>Not sent</h1><p>${esc(l.employer)}: ${esc(result)}, so no second email went out.</p>`);
   }
   if (path === '/scan/invite-all' && request.method === 'GET') {
     const w = url.searchParams.get('w'), t = url.searchParams.get('t');
@@ -2277,9 +2285,12 @@ async function handleInviteRoute(path, request, url, env, ctx) {
     const form = await request.formData();
     const list = await loadLeads(form.get('w'), form.get('t'));
     if (!list || !list.length) return sentAlready();
-    let n = 0;
-    for (const l of list) if (await sendInvite(l, env)) n++;
-    return scanPage('Sent', () => `<h1>${n} invite${n === 1 ? '' : 's'} sent ✓</h1><p>Anyone who taps yes goes live by themselves.</p>`);
+    const rows = [];
+    for (const l of list) rows.push({ l, result: await sendInvite(l, env) });
+    const n = rows.filter(r => r.result === 'sent').length;
+    return scanPage('Sent', esc => `<h1>${n} of ${rows.length} invite${rows.length === 1 ? '' : 's'} sent ✓</h1>
+${rows.map(r => `<div class="card"><strong>${esc(r.l.employer)}</strong><div class="meta">${r.result === 'sent' ? 'Sent ✓' : 'Not sent: ' + esc(r.result)}</div></div>`).join('')}
+<p class="meta">Anyone who taps yes goes live by themselves. Nobody gets more than one invite every 90 days.</p>`);
   }
 
   // ── The employer's side ──
