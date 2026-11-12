@@ -2697,8 +2697,7 @@ async function handleEmployerSignup(request, env, origin) {
       attributes: {
         custom_source: 'DCJ employers page',
         profile: { data: { type: 'profile', attributes: {
-          email, organization: business,
-          subscriptions: { email: { marketing: { consent: 'SUBSCRIBED' } } }
+          email, organization: business
         } } }
       },
       relationships: { list: { data: { type: 'list', id: KLAVIYO_EMPLOYER_LIST } } }
