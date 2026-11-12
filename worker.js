@@ -528,6 +528,10 @@ Brew method: ${method}. Problem: ${issue}`;
         return jsonResponse({ views: next }, 200, ALLOWED_ORIGIN);
       }
 
+      if (path === '/employers/signup' && request.method === 'POST') {
+        return await handleEmployerSignup(request, env, ALLOWED_ORIGIN);
+      }
+
       if (path === '/alerts/create' && request.method === 'POST') {
         const { email, kind, role, area, minRate } = await request.json();
         if (!email || !kind) return jsonResponse({ error: 'Email and kind are required' }, 400, ALLOWED_ORIGIN);
@@ -2669,4 +2673,46 @@ async function weeklyNumbers(env, listings, now = Date.now()) {
     if (v) views += parseInt(v, 10) || 0;
   }
   return { newListings: newOnes.length, liveListings: live.length, views, ...totals };
+}
+
+
+// Employer sign-up from /employers. Sends to Klaviyo's public subscribe endpoint
+// (list is double opt-in, so Klaviyo emails a confirmation). No secret key needed.
+const KLAVIYO_COMPANY_ID = 'WEzjzU';
+const KLAVIYO_EMPLOYER_LIST = 'SQ5mW4';
+
+async function handleEmployerSignup(request, env, origin) {
+  let body;
+  try { body = await request.json(); } catch { return jsonResponse({ error: 'Bad request' }, 400, origin); }
+  if (body.website) return jsonResponse({ ok: true }, 200, origin); // honeypot: bots fill this
+  const email = String(body.email || '').trim().toLowerCase();
+  const business = String(body.business || '').trim().slice(0, 120);
+  if (!business) return jsonResponse({ error: 'Please add your business name.' }, 400, origin);
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 200) {
+    return jsonResponse({ error: 'Please check your email address.' }, 400, origin);
+  }
+  const payload = {
+    data: {
+      type: 'subscription',
+      attributes: {
+        custom_source: 'DCJ employers page',
+        profile: { data: { type: 'profile', attributes: {
+          email, organization: business,
+          subscriptions: { email: { marketing: { consent: 'SUBSCRIBED' } } }
+        } } }
+      },
+      relationships: { list: { data: { type: 'list', id: KLAVIYO_EMPLOYER_LIST } } }
+    }
+  };
+  const res = await fetch(`https://a.klaviyo.com/client/subscriptions?company_id=${KLAVIYO_COMPANY_ID}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/vnd.api+json', 'Accept': 'application/vnd.api+json', 'revision': '2024-10-15' },
+    body: JSON.stringify(payload)
+  });
+  if (res.status >= 200 && res.status < 300) {
+    try { await bumpStat(env, 'employer_signups'); } catch {}
+    return jsonResponse({ ok: true }, 200, origin);
+  }
+  console.log('Klaviyo signup failed', res.status, await res.text().catch(() => ''));
+  return jsonResponse({ error: 'Something went wrong. Please try again in a minute.' }, 502, origin);
 }
