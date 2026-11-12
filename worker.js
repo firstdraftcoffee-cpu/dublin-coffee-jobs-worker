@@ -2713,6 +2713,7 @@ async function handleEmployerSignup(request, env, origin) {
     try { await bumpStat(env, 'employer_signups'); } catch {}
     return jsonResponse({ ok: true }, 200, origin);
   }
-  console.log('Klaviyo signup failed', res.status, await res.text().catch(() => ''));
-  return jsonResponse({ error: 'Something went wrong. Please try again in a minute.' }, 502, origin);
+  const kText = await res.text().catch(() => '');
+  console.log('Klaviyo signup failed', res.status, kText);
+  return jsonResponse({ error: 'Something went wrong. Please try again in a minute.', detail: `Klaviyo ${res.status}: ${kText.slice(0, 300)}` }, 502, origin);
 }
