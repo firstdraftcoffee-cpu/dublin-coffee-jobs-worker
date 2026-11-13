@@ -2193,8 +2193,8 @@ const MANUAL_INVITE_LEADS = [
     email: 'info@mistermagpiecoffee.com', website: 'https://mistermagpiecoffee.com' },   // email from Ger 13/11/26; always hiring via job sites
   { employer: 'The Art of Coffee', role: 'Barista', location: 'Dublin',
     email: 'hello@theartofcoffee.ie', website: 'https://theartofcoffee.ie' },   // email from Ger 13/11/26; always hiring via job sites
-  { employer: 'Silverskin Coffee Roasters', role: 'Roaster / Production Assistant', location: 'Dublin 10',
-    email: 'info@silverskincoffee.ie', website: 'https://silverskincoffee.ie', noAd: true },   // email from Ger 13/11/26; no current ad seen, so the invite doesn't claim one
+  { employer: 'Silverskin Coffee Roasters', role: 'Coffee Professional', location: 'Dublin 10',
+    email: 'info@silverskincoffee.ie', website: 'https://silverskincoffee.ie' },   // email + role from Ger 13/11/26
 ];
 
 function validInviteEmail(e) {
