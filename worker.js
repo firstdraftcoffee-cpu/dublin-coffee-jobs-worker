@@ -1696,10 +1696,11 @@ async function scanEmployer(emp, env) {
   const prompt = `You are helping a coffee and hospitality jobs board in Ireland.
 Below is the careers page of "${emp.name}" (${pageUrl}), plus the links on it.
 List the CURRENT job openings that are (a) located on the island of Ireland (the Republic or Northern Ireland) and (b) front-line coffee, café, hospitality or kitchen roles: barista, head barista, café or shop manager/supervisor, team member/customer assistant in a café or coffee counter, roaster, coffee trainer, coffee/wholesale sales, waiting staff, bartender, chef, baker, kitchen porter, hotel front-of-house and similar.
-Leave out head office, IT, finance, warehouse, driving and retail roles with no café or food element. Leave out anything that is not clearly an open vacancy. If there are none, return [].
+Leave out head office, IT, finance, warehouse, driving and retail roles with no café or food element. Leave out anything that is not clearly an open vacancy. If there are none, return [].${seasonalOn() ? `
+It's Christmas hiring season: include temporary, seasonal and Christmas roles of these kinds too (Christmas markets, festive pop-ups, seasonal café or hotel staff), and put "Seasonal" or "Temporary" in their type.` : ''}
 List at most 25 roles, most coffee-focused first.
 Reply with ONLY a JSON array, no other text. Each item:
-{"title": "...", "location": "town or county", "salary": "only if stated, else empty", "type": "Full time / Part time / Contract or empty", "applyUrl": "the most specific link from the LINKS list for this role, or the careers page", "summary": "one or two plain sentences about the role, in your own words"}
+{"title": "...", "location": "town or county", "salary": "only if stated, else empty", "type": "Full time / Part time / Contract / Seasonal / Temporary, or empty", "applyUrl": "the most specific link from the LINKS list for this role, or the careers page", "summary": "one or two plain sentences about the role, in your own words"}
 
 LINKS:
 ${links.map(l => `- ${l.text} → ${l.href}`).join('\n').slice(0, 25000)}
@@ -1729,7 +1730,7 @@ ${text}`;
 }
 
 const normName = s => String(s || '').toLowerCase().replace(/\([^)]*\)/g, ' ').replace(/[^a-z0-9]/g, '');
-const TITLE_FILLER = /\b(full[- ]?time|part[- ]?time|ft|pt|permanent|temporary|temp|seasonal|contract|term[- ]?time|immediate start|urgent(ly)?|wanted|required|hiring|vacancy|job|role|position|[0-9]+\/[0-9]+)\b/g;
+const TITLE_FILLER = /\b(full[- ]?time|part[- ]?time|ft|pt|permanent|contract|term[- ]?time|immediate start|urgent(ly)?|wanted|required|hiring|vacancy|job|role|position|[0-9]+\/[0-9]+)\b/g;
 function coreTitle(t) {
   let x = String(t || '').toLowerCase().replace(/\([^)]*\)/g, ' ');
   x = x.split(/\s[-–—|@]\s|,/)[0];          // drop "- Smithfield", "| Dublin", ", Cork"
@@ -1778,6 +1779,7 @@ function alreadyOnBoard(role, emp, listings) {
     if (ru && urlKey(l.data.applyUrl) === ru) return true;
     if (!sameEmployer(l, emp)) return false;
     if (l.roundup) return true;
+    if (isSeasonal(`${role.title} ${role.type}`) !== isSeasonal(`${l.data.title} ${l.data.type}`)) return false;
     const lt = coreTitle(l.data.title);
     if (!ct || !lt) return false;
     if (ct === lt) return true;
@@ -1791,7 +1793,7 @@ function alreadyOnBoard(role, emp, listings) {
 async function saveDraftIfNew(role, emp, listings, state, env) {
   // Small wording changes between scans ("Kitchen Crew" vs "Kitchen Crew - Smithfield",
   // "Dublin" vs "Dublin, Smithfield") must not make an old job look new.
-  const key = `${normName(emp.name)}|${coreTitle(role.title)}|${placeKey(role.location)}`;
+  const key = `${normName(emp.name)}|${coreTitle(role.title)}|${placeKey(role.location)}` + (isSeasonal(`${role.title} ${role.type}`) ? '|seasonal' : '');
   const seenKey = 'scan:seen:' + await hashText(key);
   if (await env.FDC_STORE.get(seenKey)) return null;
   // Jobs offered before this change were remembered by their exact wording.
@@ -1906,6 +1908,12 @@ function coffeeScore(title) {
 }
 
 const PER_EMPLOYER = 3;
+
+// Christmas season: temporary, seasonal and Christmas jobs are looked for too,
+// up to and including this date (Dublin time). Ger asked 13/11/26: "until January".
+const SEASONAL_UNTIL = '2027-01-06';
+const seasonalOn = (now = new Date()) => dublinNow(now).date <= SEASONAL_UNTIL;
+const isSeasonal = s => /\b(christmas|xmas|festive|seasonal|temporary|temp|holiday cover)\b/i.test(String(s || ''));
 
 // Builds the Monday email: at most three roles per employer (most coffee-
 // focused first), a one-post "They're hiring" roundup for any employer with
@@ -2199,7 +2207,7 @@ async function findInviteLeads(env, listings, state) {
   const scanned = employers.filter(e => e.url).map(e => e.name);
   const watch = employers.filter(e => !e.url || e.alsoWatch).map(e => e.name);
   const prompt = `You are helping Dublin Coffee Jobs, a free Irish coffee and hospitality jobs board, invite employers to list their vacancies.
-Find as many as you can, up to ${MAX_LEADS}, employers in Ireland that are hiring RIGHT NOW (ads from the last 3 weeks) for coffee, café, bakery, restaurant, bar or hotel front-line roles — barista, café staff, supervisor or manager, chef, waiting staff, bartender and similar. Favour independent cafés, coffee roasters, bakeries and small groups.
+Find as many as you can, up to ${MAX_LEADS}, employers in Ireland that are hiring RIGHT NOW (ads from the last 3 weeks) for coffee, café, bakery, restaurant, bar or hotel front-line roles — barista, café staff, supervisor or manager, chef, waiting staff, bartender and similar.${seasonalOn() ? ' Temporary, seasonal and Christmas roles count too (Christmas markets, festive pop-ups, seasonal café staff).' : ''} Favour independent cafés, coffee roasters, bakeries and small groups.
 You may use job sites such as Indeed, IrishJobs, Jobs.ie or LinkedIn ONLY to see who is hiring and for what role. Do not copy anything else from them.
 Work efficiently: use job-site searches to collect several hiring employers at once, then find each one's GENERAL contact email published on the employer's OWN website (e.g. info@, hello@, jobs@, careers@). Never use a named person's email address, and never guess an address. Skip the employer if you can't find one.
 Check these first, and include any that are hiring now: ${watch.join('; ')}.
