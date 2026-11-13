@@ -1501,6 +1501,7 @@ const DEFAULT_SCAN_EMPLOYERS = [
   { name: 'Scéal Bakery', type: 'Bakery', url: 'https://www.scealbakery.com/careers', alsoWatch: true },   // not checked by hand (link too long to open); email flags it if unreadable
   { name: 'Café Sol', type: 'Coffee shops & Dunnes kiosks', url: '', formOnly: true },
   { name: 'Coffeeangel', type: 'Specialty coffee', url: '', formOnly: true },   // careers page has no job list (checked 03/11/26)
+  { name: 'The Art of Coffee', type: 'Specialty coffee shops, Dublin', url: '', formOnly: true },   // no own careers page found (13/11/26); hires via job sites, so watched for invites
 ];
 const SCAN_START_HOUR = 1;
 // One-off extra scan days on top of every Monday (YYYY-MM-DD, Dublin time).
