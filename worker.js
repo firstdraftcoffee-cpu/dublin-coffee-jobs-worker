@@ -1752,6 +1752,15 @@ function hostKey(u) {
     return h;
   } catch { return ''; }
 }
+// Words that change what the job is: level (head, senior, assistant…) or kind
+// of role (pastry, kitchen, front of house…). Compared as a sorted set.
+const RANK_WORDS = ['head','senior','snr','sr','lead','principal','junior','jnr','jr','trainee','apprentice','graduate','intern',
+  'assistant','asst','deputy','sous','supervisor','manager','mgr','management','general','area','regional','team','shift','duty',
+  'commis','partie','executive','pastry','kitchen','front','floor','store','shop','bar','coffee','roaster','roastery','training','trainer','coordinator','chef','barista','baker','porter'];
+function rankWords(t) {
+  const x = String(t || '').toLowerCase().replace(/\([^)]*\)/g, ' ').split(/\s[-–—|@]\s|,/)[0];
+  return [...new Set(x.split(/[^a-z]+/).filter(w => RANK_WORDS.includes(w)))].sort().join(' ');
+}
 function sameEmployer(listing, emp) {
   const d = listing.data || {};
   const a = normName(d.venue), b = normName(emp.name);
@@ -1770,7 +1779,12 @@ function alreadyOnBoard(role, emp, listings) {
     if (!sameEmployer(l, emp)) return false;
     if (l.roundup) return true;
     const lt = coreTitle(l.data.title);
-    return !!ct && !!lt && (ct === lt || (Math.min(ct.length, lt.length) >= 5 && (ct.includes(lt) || lt.includes(ct))));
+    if (!ct || !lt) return false;
+    if (ct === lt) return true;
+    // "Barista" vs "Head Barista" are different jobs: any difference in level or
+    // kind-of-role words means a separate role, only other extra words are ignored.
+    if (rankWords(role.title) !== rankWords(l.data.title)) return false;
+    return Math.min(ct.length, lt.length) >= 5 && (ct.includes(lt) || lt.includes(ct));
   });
 }
 
