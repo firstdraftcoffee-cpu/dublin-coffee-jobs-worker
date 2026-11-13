@@ -1503,6 +1503,7 @@ const DEFAULT_SCAN_EMPLOYERS = [
   { name: 'Coffeeangel', type: 'Specialty coffee', url: '', formOnly: true },   // careers page has no job list (checked 03/11/26)
   { name: 'The Art of Coffee', type: 'Specialty coffee shops, Dublin', url: '', formOnly: true },   // no own careers page found (13/11/26); hires via job sites, so watched for invites
   { name: 'Mister Magpie Coffee', type: 'Specialty coffee, Dublin', url: '', formOnly: true },   // no own careers page found (13/11/26); always hiring via job sites, so watched for invites
+  { name: 'Eclective Hospitality', type: 'Restaurant & bar group (Elephant & Castle, Captain Americas…)', url: '', formOnly: true },   // careers page has no job list (13/11/26)
   { name: 'Silverskin Coffee Roasters', type: 'Coffee roaster, Dublin 10', url: '', formOnly: true },   // no own careers page found (13/11/26); watched for invites
 ];
 const SCAN_START_HOUR = 1;
@@ -2195,6 +2196,8 @@ const MANUAL_INVITE_LEADS = [
     email: 'hello@theartofcoffee.ie', website: 'https://theartofcoffee.ie' },   // email from Ger 13/11/26; always hiring via job sites
   { employer: 'Silverskin Coffee Roasters', role: 'Coffee Professional', location: 'Dublin 10',
     email: 'info@silverskincoffee.ie', website: 'https://silverskincoffee.ie' },   // email + role from Ger 13/11/26
+  { employer: 'Eclective Hospitality', role: 'Barista', location: 'Dublin',
+    email: 'recruitment@eclective.ie', website: 'https://eclective.ie/careers', noAd: true },   // 13/11/26: careers page has no job list, applications by email; only ads seen were from 2025, so general wording
 ];
 
 function validInviteEmail(e) {
