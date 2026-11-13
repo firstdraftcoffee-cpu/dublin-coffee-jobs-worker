@@ -2187,6 +2187,8 @@ const MANUAL_INVITE_LEADS = [
     email: 'jobs@guji.ie', website: 'https://guji.ie' },   // seen 03/11/26, jobs page last updated 2022
   { employer: 'Roasted Notes', role: 'Café Assistant Manager', location: 'Swords Pavilions, Co. Dublin',
     email: 'hradmin@ksg.ie', website: 'https://www.roastednotes.ie' },   // seen 09/11/26, careers page has no date
+  { employer: 'Mister Magpie Coffee', role: 'Barista', location: 'Dublin',
+    email: 'info@mistermagpiecoffee.com', website: 'https://mistermagpiecoffee.com' },   // email from Ger 13/11/26; always hiring via job sites
 ];
 
 function validInviteEmail(e) {
