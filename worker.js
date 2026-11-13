@@ -1797,7 +1797,13 @@ async function saveDraftIfNew(role, emp, listings, state, env) {
   // Jobs offered before this change were remembered by their exact wording.
   const oldKey = `${emp.name}|${role.title}|${role.location}`.toLowerCase().replace(/\s+/g, ' ');
   if (await env.FDC_STORE.get('scan:seen:' + await hashText(oldKey))) return null;
-  if (alreadyOnBoard(role, emp, listings)) return null;
+  if (alreadyOnBoard(role, emp, listings)) {
+    // Shown in small print in the email so Ger can spot a real new job that got skipped.
+    state.skipped = state.skipped || [];
+    const line = `${emp.name.replace(/\s*\([^)]*\)/g, '')}: ${role.title}${role.location ? ' (' + role.location + ')' : ''}`;
+    if (!state.skipped.includes(line)) state.skipped.push(line);
+    return null;
+  }
 
   const id = crypto.randomUUID();
   const draft = { id, token: randomToken(), week: state.week, allToken: state.allToken, employer: emp.name, sourceUrl: cleanUrl(emp.url), ...role, createdAt: Date.now() };
@@ -1997,6 +2003,12 @@ async function sendScanEmail(state, env) {
   const extras = [];
   if (state.addedEmployers.length) extras.push(`Added to the scan: ${state.addedEmployers.join(', ')}.`);
   extras.push(...state.notes);
+  const skipped = state.skipped || [];
+  if (skipped.length) {
+    const showS = skipped.slice(0, 30);
+    html.push(`<div style="margin-top:24px;color:#6b6157;font-size:13px;"><p style="margin:0 0 4px;font-weight:600;">Left out: already on the board (${skipped.length})</p><p style="margin:0 0 6px;">Worth a glance: if one of these is really a new job, tell Claude so the check can be fixed.</p>${showS.map(x => `<div style="margin:2px 0;">${esc(x)}</div>`).join('')}${skipped.length > showS.length ? `<div style="margin:2px 0;">and ${skipped.length - showS.length} more</div>` : ''}</div>`);
+    text.push(`LEFT OUT — ALREADY ON THE BOARD (${skipped.length})`, ...showS, '');
+  }
   if (extras.length) { html.push(`<div style="margin-top:24px;color:#6b6157;font-size:13px;">${extras.map(e => `<p style="margin:6px 0;">${esc(e)}</p>`).join('')}</div>`); text.push(...extras, ''); }
   html.push(`<p style="margin-top:24px;color:#6b6157;font-size:12px;">Links work for 14 days. Nothing goes up unless you post it.</p></div></div>`);
   text.push('Links work for 14 days.');
