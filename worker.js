@@ -1503,6 +1503,7 @@ const DEFAULT_SCAN_EMPLOYERS = [
   { name: 'Coffeeangel', type: 'Specialty coffee', url: '', formOnly: true },   // careers page has no job list (checked 03/11/26)
   { name: 'The Art of Coffee', type: 'Specialty coffee shops, Dublin', url: '', formOnly: true },   // no own careers page found (13/11/26); hires via job sites, so watched for invites
   { name: 'Mister Magpie Coffee', type: 'Specialty coffee, Dublin', url: '', formOnly: true },   // no own careers page found (13/11/26); always hiring via job sites, so watched for invites
+  { name: 'Silverskin Coffee Roasters', type: 'Coffee roaster, Dublin 10', url: '', formOnly: true },   // no own careers page found (13/11/26); watched for invites
 ];
 const SCAN_START_HOUR = 1;
 // One-off extra scan days on top of every Monday (YYYY-MM-DD, Dublin time).
