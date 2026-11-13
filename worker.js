@@ -2189,6 +2189,8 @@ const MANUAL_INVITE_LEADS = [
     email: 'hradmin@ksg.ie', website: 'https://www.roastednotes.ie' },   // seen 09/11/26, careers page has no date
   { employer: 'Mister Magpie Coffee', role: 'Barista', location: 'Dublin',
     email: 'info@mistermagpiecoffee.com', website: 'https://mistermagpiecoffee.com' },   // email from Ger 13/11/26; always hiring via job sites
+  { employer: 'The Art of Coffee', role: 'Barista', location: 'Dublin',
+    email: 'hello@theartofcoffee.ie', website: 'https://theartofcoffee.ie' },   // email from Ger 13/11/26; always hiring via job sites
 ];
 
 function validInviteEmail(e) {
