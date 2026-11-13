@@ -1697,8 +1697,8 @@ async function scanEmployer(emp, env) {
 
   const prompt = `You are helping a coffee and hospitality jobs board in Ireland.
 Below is the careers page of "${emp.name}" (${pageUrl}), plus the links on it.
-List the CURRENT job openings that are (a) located on the island of Ireland (the Republic or Northern Ireland) and (b) front-line coffee, café, hospitality or kitchen roles: barista, head barista, café or shop manager/supervisor, team member/customer assistant in a café or coffee counter, roaster, coffee trainer, coffee/wholesale sales, waiting staff, bartender, chef, baker, kitchen porter, hotel front-of-house and similar.
-Leave out head office, IT, finance, warehouse, driving and retail roles with no café or food element. Leave out anything that is not clearly an open vacancy. If there are none, return [].${seasonalOn() ? `
+List the CURRENT job openings that are (a) located on the island of Ireland (the Republic or Northern Ireland) and (b) front-line coffee, café, hospitality or kitchen roles: barista, head barista, café or shop manager/supervisor, team member/customer assistant in a café or coffee counter, roaster, roastery or production assistant, coffee packing and green coffee roles at a roastery, coffee trainer, coffee/wholesale sales, waiting staff, bartender, chef, baker, kitchen porter, hotel front-of-house and similar.
+Leave out head office, IT, finance, warehouse, driving and retail roles with no café, food or coffee-roasting element (production, packing and dispatch jobs at a coffee roastery or bakery DO count). Leave out anything that is not clearly an open vacancy. If there are none, return [].${seasonalOn() ? `
 It's Christmas hiring season: include temporary, seasonal and Christmas roles of these kinds too (Christmas markets, festive pop-ups, seasonal café or hotel staff), and put "Seasonal" or "Temporary" in their type.` : ''}
 List at most 25 roles, most coffee-focused first.
 Reply with ONLY a JSON array, no other text. Each item:
@@ -1759,7 +1759,7 @@ function hostKey(u) {
 // of role (pastry, kitchen, front of house…). Compared as a sorted set.
 const RANK_WORDS = ['head','senior','snr','sr','lead','principal','junior','jnr','jr','trainee','apprentice','graduate','intern',
   'assistant','asst','deputy','sous','supervisor','manager','mgr','management','general','area','regional','team','shift','duty',
-  'commis','partie','executive','pastry','kitchen','front','floor','store','shop','bar','coffee','roaster','roastery','training','trainer','coordinator','chef','barista','baker','porter'];
+  'commis','partie','executive','pastry','kitchen','front','floor','store','shop','bar','coffee','roaster','roastery','roasting','production','packing','dispatch','training','trainer','coordinator','chef','barista','baker','porter'];
 function rankWords(t) {
   const x = String(t || '').toLowerCase().replace(/\([^)]*\)/g, ' ').split(/\s[-–—|@]\s|,/)[0];
   return [...new Set(x.split(/[^a-z]+/).filter(w => RANK_WORDS.includes(w)))].sort().join(' ');
@@ -1903,7 +1903,8 @@ async function callClaudeWithSearch(prompt, env, maxUses = 6) {
 // How coffee-focused a job title is — used to pick each employer's top three.
 function coffeeScore(title) {
   const t = String(title || '').toLowerCase();
-  if (/barista|coffee|espresso|roast/.test(t)) return 4;
+  if (/barista|coffee|espresso|roast|green buyer|q grader/.test(t)) return 4;
+  if (/production|packing|packer/.test(t)) return 3;
   if (/caf[eé]|deli|bakery|baker|pastry|counter|food ?hall/.test(t)) return 3;
   if (/chef|cook|kitchen|food|f&b|beverage|waiter|waitress|server|bar|host|restaurant|breakfast/.test(t)) return 2;
   return 1;
@@ -2213,7 +2214,7 @@ async function findInviteLeads(env, listings, state) {
   const scanned = employers.filter(e => e.url).map(e => e.name);
   const watch = employers.filter(e => !e.url || e.alsoWatch).map(e => e.name);
   const prompt = `You are helping Dublin Coffee Jobs, a free Irish coffee and hospitality jobs board, invite employers to list their vacancies.
-Find as many as you can, up to ${MAX_LEADS}, employers in Ireland that are hiring RIGHT NOW (ads from the last 3 weeks) for coffee, café, bakery, restaurant, bar or hotel front-line roles — barista, café staff, supervisor or manager, chef, waiting staff, bartender and similar.${seasonalOn() ? ' Temporary, seasonal and Christmas roles count too (Christmas markets, festive pop-ups, seasonal café staff).' : ''} Favour independent cafés, coffee roasters, bakeries and small groups.
+Find as many as you can, up to ${MAX_LEADS}, employers in Ireland that are hiring RIGHT NOW (ads from the last 3 weeks) for coffee, café, bakery, restaurant, bar or hotel front-line roles — barista, café staff, supervisor or manager, coffee roaster, roastery or production assistant, chef, waiting staff, bartender and similar.${seasonalOn() ? ' Temporary, seasonal and Christmas roles count too (Christmas markets, festive pop-ups, seasonal café staff).' : ''} Favour independent cafés, coffee roasters, bakeries and small groups.
 You may use job sites such as Indeed, IrishJobs, Jobs.ie or LinkedIn ONLY to see who is hiring and for what role. Do not copy anything else from them.
 Work efficiently: use job-site searches to collect several hiring employers at once, then find each one's GENERAL contact email published on the employer's OWN website (e.g. info@, hello@, jobs@, careers@). Never use a named person's email address, and never guess an address. Skip the employer if you can't find one.
 Check these first, and include any that are hiring now: ${watch.join('; ')}.
