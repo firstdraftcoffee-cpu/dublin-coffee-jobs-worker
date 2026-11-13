@@ -1728,14 +1728,62 @@ ${text}`;
   }).filter(r => r.title);
 }
 
+const normName = s => String(s || '').toLowerCase().replace(/\([^)]*\)/g, ' ').replace(/[^a-z0-9]/g, '');
+const TITLE_FILLER = /\b(full[- ]?time|part[- ]?time|ft|pt|permanent|temporary|temp|seasonal|contract|term[- ]?time|immediate start|urgent(ly)?|wanted|required|hiring|vacancy|job|role|position|[0-9]+\/[0-9]+)\b/g;
+function coreTitle(t) {
+  let x = String(t || '').toLowerCase().replace(/\([^)]*\)/g, ' ');
+  x = x.split(/\s[-–—|@]\s|,/)[0];          // drop "- Smithfield", "| Dublin", ", Cork"
+  return x.replace(TITLE_FILLER, ' ').replace(/[^a-z0-9]/g, '');
+}
+const placeKey = l => String(l || '').toLowerCase().split(/[,(/]/)[0].replace(/[^a-z0-9]/g, '');
+function urlKey(u) {
+  try {
+    const x = new URL(u);
+    return (x.hostname.replace(/^www\./, '') + x.pathname.replace(/\/+$/, '')).toLowerCase();
+  } catch { return ''; }
+}
+function hostKey(u) {
+  try {
+    const x = new URL(u); const h = x.hostname.replace(/^www\./, '').toLowerCase();
+    // Shared hiring platforms: the employer is the first part of the path (or the subdomain).
+    if (/(workable|greenhouse|lever|bamboohr|smartrecruiters|personio|teamtailor|recruitee|jobs\.ashbyhq)\./.test(h)) {
+      return h + '/' + (x.pathname.split('/').filter(Boolean)[0] || '');
+    }
+    return h;
+  } catch { return ''; }
+}
+function sameEmployer(listing, emp) {
+  const d = listing.data || {};
+  const a = normName(d.venue), b = normName(emp.name);
+  if (a && b && (a === b || (Math.min(a.length, b.length) >= 4 && (a.includes(b) || b.includes(a))))) return true;
+  const eh = hostKey(emp.url);
+  return !!eh && [d.sourceUrl, d.applyUrl].some(u => u && hostKey(u) === eh);
+}
+// True when this role (or the employer as a whole, via a "they're hiring" listing)
+// is already on the board — live or hidden by Ger.
+function alreadyOnBoard(role, emp, listings) {
+  const ct = coreTitle(role.title);
+  const ru = role.applyUrl && role.applyUrl !== cleanUrl(emp.url) ? urlKey(role.applyUrl) : '';
+  return listings.some(l => {
+    if (l.kind !== 'job' || !l.data) return false;
+    if (ru && urlKey(l.data.applyUrl) === ru) return true;
+    if (!sameEmployer(l, emp)) return false;
+    if (l.roundup) return true;
+    const lt = coreTitle(l.data.title);
+    return !!ct && !!lt && (ct === lt || (Math.min(ct.length, lt.length) >= 5 && (ct.includes(lt) || lt.includes(ct))));
+  });
+}
+
 async function saveDraftIfNew(role, emp, listings, state, env) {
-  const key = `${emp.name}|${role.title}|${role.location}`.toLowerCase().replace(/\s+/g, ' ');
+  // Small wording changes between scans ("Kitchen Crew" vs "Kitchen Crew - Smithfield",
+  // "Dublin" vs "Dublin, Smithfield") must not make an old job look new.
+  const key = `${normName(emp.name)}|${coreTitle(role.title)}|${placeKey(role.location)}`;
   const seenKey = 'scan:seen:' + await hashText(key);
   if (await env.FDC_STORE.get(seenKey)) return null;
-  const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-  const alreadyLive = listings.some(l => l.kind === 'job' && !l.flagged &&
-    norm(l.data && l.data.venue) === norm(emp.name) && norm(l.data && l.data.title) === norm(role.title));
-  if (alreadyLive) return null;
+  // Jobs offered before this change were remembered by their exact wording.
+  const oldKey = `${emp.name}|${role.title}|${role.location}`.toLowerCase().replace(/\s+/g, ' ');
+  if (await env.FDC_STORE.get('scan:seen:' + await hashText(oldKey))) return null;
+  if (alreadyOnBoard(role, emp, listings)) return null;
 
   const id = crypto.randomUUID();
   const draft = { id, token: randomToken(), week: state.week, allToken: state.allToken, employer: emp.name, sourceUrl: cleanUrl(emp.url), ...role, createdAt: Date.now() };
