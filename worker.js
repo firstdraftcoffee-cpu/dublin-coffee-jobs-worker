@@ -2206,6 +2206,8 @@ const MANUAL_INVITE_LEADS = [
     email: 'careers@butlers.ie', website: 'https://www.butlerschocolates.com/our-careers' },   // seen by Ger 14/11/26; email from their careers page
   { employer: 'Southbank Café', role: 'Front of House / Barista', location: "Harold's Cross",
     email: 'hello@southbankcafe.ie', website: 'https://southbankcafe.ie' },   // job seen by Ger 14/11/26; email from Ger
+  { employer: 'Behind the Label Coffee Roasters', role: 'Roasting + Production Manager', location: 'Damastown, Dublin 15',
+    email: 'darren@behindthelabel.ie', website: 'https://www.behindthelabelcoffee.ie' },   // job seen by Ger 14/11/26; email from Ger
 ];
 
 function validInviteEmail(e) {
