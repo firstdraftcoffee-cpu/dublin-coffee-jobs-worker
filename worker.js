@@ -2204,6 +2204,8 @@ const MANUAL_INVITE_LEADS = [
     email: 'recruitment@eclective.ie', website: 'https://eclective.ie/careers', noAd: true },   // 13/11/26: careers page has no job list, applications by email; only ads seen were from 2025, so general wording
   { employer: 'Butlers Chocolate Café', role: 'Café Manager & Supervisor', location: 'Carrickmines',
     email: 'careers@butlers.ie', website: 'https://www.butlerschocolates.com/our-careers' },   // seen by Ger 14/11/26; email from their careers page
+  { employer: 'Southbank Café', role: 'Front of House / Barista', location: "Harold's Cross",
+    email: 'hello@southbankcafe.ie', website: 'https://southbankcafe.ie' },   // job seen by Ger 14/11/26; email from Ger
 ];
 
 function validInviteEmail(e) {
