@@ -1504,11 +1504,13 @@ const DEFAULT_SCAN_EMPLOYERS = [
   { name: 'The Art of Coffee', type: 'Specialty coffee shops, Dublin', url: '', formOnly: true },   // no own careers page found (13/11/26); hires via job sites, so watched for invites
   { name: 'Mister Magpie Coffee', type: 'Specialty coffee, Dublin', url: '', formOnly: true },   // no own careers page found (13/11/26); always hiring via job sites, so watched for invites
   { name: 'Eclective Hospitality', type: 'Restaurant & bar group (Elephant & Castle, Captain Americas…)', url: '', formOnly: true },   // careers page has no job list (13/11/26)
+  { name: 'Behind the Label Coffee Roasters', type: 'Coffee roaster, Dublin', url: '', formOnly: true },   // hiring 14/11/26 (Ger); no careers page or public email
+  { name: 'UCC Coffee Ireland', type: 'Coffee roaster & supplier', url: '', formOnly: true },   // hiring 14/11/26 (Ger); jobs on job sites only
   { name: 'Silverskin Coffee Roasters', type: 'Coffee roaster, Dublin 10', url: '', formOnly: true },   // no own careers page found (13/11/26); watched for invites
 ];
 const SCAN_START_HOUR = 1;
 // One-off extra scan days on top of every Monday (YYYY-MM-DD, Dublin time).
-const EXTRA_SCAN_DATES = ['2026-11-03', '2026-11-04'];
+const EXTRA_SCAN_DATES = ['2026-11-03', '2026-11-04', '2026-11-14'];   // 14/11: bonus run so Saturday's new jobs and invites go out today
 // Regular scan days (Dublin time): scans overnight, email lands around 8am Tue & Fri.
 const SCAN_DAYS = ['Tue', 'Fri'];
 const SCAN_EMAIL_HOUR = 8;
