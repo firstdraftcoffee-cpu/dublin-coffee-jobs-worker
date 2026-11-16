@@ -2308,7 +2308,7 @@ async function sendInvite(lead, env) {
   }
   const inv = { id: crypto.randomUUID(), token: randomToken(), employer: lead.employer, role: lead.noAd ? '' : lead.role,
     location: lead.location, email: lead.email, website: lead.website, sentAt: Date.now() };
-  await env.FDC_STORE.put(`invite:${inv.id}`, JSON.stringify(inv), { expirationTtl: 60 * 60 * 24 * 30 });
+  await env.FDC_STORE.put(`invite:${inv.id}`, JSON.stringify(inv), { expirationTtl: 60 * 60 * 24 * 60 });
   await env.FDC_STORE.put(`invite:sent:${lead.email}`, String(Date.now()), { expirationTtl: 60 * 60 * 24 * 90 });
   // Keeps the "don't email me again" link working for a year, after the invite itself expires.
   await env.FDC_STORE.put(`invite:stop:${inv.id}`, JSON.stringify({ token: inv.token, email: lead.email }), { expirationTtl: 60 * 60 * 24 * 365 });
@@ -2404,16 +2404,21 @@ ${rows.map(r => `<div class="card"><strong>${esc(r.l.employer)}</strong><div cla
   }
 
   // ── The employer's side ──
+  // An invite that's been used shows the live listing again (re-opened email,
+  // back button, double tap) rather than looking like it failed.
+  const alreadyLive = inv => scanPage('Live', esc => `<h1>You're already live ✓</h1><p>Your listing from this invite is on Dublin Coffee Jobs now.</p><p><a href="${site}/job-board.html?id=${esc(inv.usedListingId)}">See your listing</a></p><p class="meta">Got another role? Post it free any time at <a href="${site}/job-board.html">dublincoffeejobs.com</a>.</p>`);
   const expired = () => scanPage('Link expired', () => `<h1>This link has expired</h1><p>No problem, you can post your job free on <a href="${site}/job-board.html">dublincoffeejobs.com</a>. It only takes a couple of minutes.</p>`);
   if (path === '/invite/yes' && request.method === 'GET') {
     const inv = await loadInvite(url.searchParams.get('id'), url.searchParams.get('t'));
-    if (!inv) return expired();
+    if (!inv) { ctx.waitUntil(alertDeadInvite(url.searchParams.get('id'), url.searchParams.get('t'), env)); return expired(); }
+    if (inv.usedListingId) return alreadyLive(inv);
     return scanPage('Your listing', esc => inviteForm(esc, inv));
   }
   if (path === '/invite/publish' && request.method === 'POST') {
     const form = await request.formData();
     const inv = await loadInvite(form.get('id'), form.get('t'));
     if (!inv) return expired();
+    if (inv.usedListingId) return alreadyLive(inv);
     const f = k => String(form.get(k) || '').trim();
     const v = { title: f('title').slice(0, 120), venue: f('venue').slice(0, 80), location: f('location').slice(0, 80),
       salary: f('salary').slice(0, 60), type: f('type').slice(0, 30), desc: f('desc').slice(0, 1500),
@@ -2434,7 +2439,7 @@ ${rows.map(r => `<div class="card"><strong>${esc(r.l.employer)}</strong><div cla
     const record = { id, kind: 'job', tier: 'standard', status: 'published', createdAt: Date.now(),
       expiresAt: Date.now() + ttl * 1000, flagged: false, freeLaunch: true, invited: true, data };
     await env.FDC_STORE.put(`listing:${id}`, JSON.stringify(record), { expirationTtl: ttl });
-    await env.FDC_STORE.delete(`invite:${inv.id}`);
+    await env.FDC_STORE.put(`invite:${inv.id}`, JSON.stringify({ ...inv, usedListingId: id, usedAt: Date.now() }), { expirationTtl: 60 * 60 * 24 * 60 });
     ctx.waitUntil(postToSocial(record, env));
     ctx.waitUntil(notifyGroupPost(record, env));
     ctx.waitUntil(sendListingConfirmation(record, env));
@@ -2855,4 +2860,18 @@ async function runWeeklyStoryEmail(env, now = new Date()) {
     await sendEmailTo(env, env.ALERT_EMAIL_TO, "No jobs video this week", `There's no "This week's jobs" video today. Either no new jobs went up in the last 7 days, or the video didn't build. If there were new jobs, tell Claude and it'll check.\n\nThanks!\nDublin Coffee Jobs`);
     await env.FDC_STORE.put(flag, '1', { expirationTtl: 60 * 60 * 24 * 8 });
   }
+}
+
+
+// An employer opened an invite link that no longer works (too old, or never
+// existed). Tell Ger once, with their email, so he can follow up by hand.
+async function alertDeadInvite(id, t, env) {
+  if (!id || !t || !env.ALERT_EMAIL_TO) return;
+  const flag = `invite:deadalert:${id}`;
+  if (await env.FDC_STORE.get(flag)) return;
+  await env.FDC_STORE.put(flag, '1', { expirationTtl: 60 * 60 * 24 * 30 });
+  let who = '';
+  try { const st = JSON.parse((await env.FDC_STORE.get(`invite:stop:${id}`)) || 'null'); if (st && st.token === t) who = st.email; } catch {}
+  await sendEmailTo(env, env.ALERT_EMAIL_TO, 'An employer tried an old invite link',
+    `Someone opened a Dublin Coffee Jobs invite link that no longer works${who ? ` (sent to ${who})` : ''}.\n\nThey were shown a page pointing them to dublincoffeejobs.com to post for free. ${who ? 'You may want to drop them a line.' : ''}\n\nThanks!\nDublin Coffee Jobs`);
 }
