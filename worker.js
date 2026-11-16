@@ -921,6 +921,20 @@ Brew method: ${method}. Problem: ${issue}`;
       }
     }
 
+    // One "X is hiring" post per employer on the board: keep the newest, hide
+    // older copies (hidden, not deleted, so they can be restored). Ger 16/11/26.
+    try {
+      const isGroupPost = l => l.kind === 'job' && !l.flagged && l.data && (l.roundup || /\bis hiring\b/i.test(l.data.title || ''));
+      const newest = new Map();
+      for (const l of listings.filter(isGroupPost).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))) {
+        const k = normName(l.data.venue);
+        if (!k) continue;
+        if (!newest.has(k)) { newest.set(k, l.id); continue; }
+        l.flagged = true; l.flagReason = 'Older copy of the same employer post';
+        await env.FDC_STORE.put(`listing:${l.id}`, JSON.stringify(l), l.expiresAt ? { expiration: Math.max(Math.floor(l.expiresAt / 1000), Math.floor(Date.now() / 1000) + 120) } : undefined);
+      }
+    } catch (e) { console.error('Duplicate post tidy error:', String(e)); }
+
     // Monday jobs scan — does a small slice each hour (see runJobScan).
     try { await runJobScan(env, listings); } catch (e) { console.error('Job scan error:', String(e)); }
     try { await runSocialQueue(env, ctx); } catch (e) { console.error('Social queue error:', String(e)); }
