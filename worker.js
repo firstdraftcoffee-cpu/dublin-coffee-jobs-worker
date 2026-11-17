@@ -1511,9 +1511,9 @@ const DEFAULT_SCAN_EMPLOYERS = [
   { name: 'The Bookshelf Coffee House (Cork & Kerry)', type: 'Café', url: 'https://bookshelfcoffee.com/jobs' },
   { name: 'Brentwood Coffee', type: 'Coffee shops', url: 'https://www.brentwoodcoffee.ie/careers' },
   { name: 'Foam Coffeehouse', type: 'Café', url: 'https://foamcoffeehouse.ie/careers-at-foam-coffeehouse/' },
-  { name: 'Mocha Beans (Galway)', type: 'Roaster, cafés & bakery', url: 'https://mochabeans.com/pages/careers' },
+  { name: 'Mocha Beans (Galway)', type: 'Roaster, cafés & bakery', url: '', formOnly: true },   // careers page unreadable; watched for invites (17/11/26)
   { name: 'BaxterStorey', type: 'Contract catering', url: 'https://baxterstorey.ie/begin-your-story/' },   // SmartRecruiters (shared UK account, Irish jobs only)
-  { name: 'Compass Group Ireland (Gather & Gather)', type: 'Contract catering', url: 'https://jobs.compass-group.co.uk/compass-ireland', alsoWatch: true },   // runs on inploi, jobs load in later — likely unreadable
+  { name: 'Compass Group Ireland (Gather & Gather)', type: 'Contract catering', url: '', formOnly: true },   // careers page shows no job list; watched for invites (17/11/26)
   { name: 'Scéal Bakery', type: 'Bakery', url: 'https://www.scealbakery.com/careers', alsoWatch: true },   // not checked by hand (link too long to open); email flags it if unreadable
   { name: 'Café Sol', type: 'Coffee shops & Dunnes kiosks', url: '', formOnly: true },
   { name: 'Coffeeangel', type: 'Specialty coffee', url: '', formOnly: true },   // careers page has no job list (checked 03/11/26)
@@ -1559,7 +1559,9 @@ async function getScanEmployers(env) {
   // Anything added to the built-in list later is merged in by name, so
   // new names reach the live list without losing what discovery found.
   // Employers confirmed (02/11/26) to advertise only on job sites, not their own:
-  for (const e of list) if (e.name.toLowerCase() === 'centra' && e.url) { e.url = ''; e.formOnly = true; }
+  // Careers pages that can't be read: watched for invites instead of scanned.
+  const WATCH_ONLY = ['centra', 'mocha beans (galway)', 'compass group ireland (gather & gather)'];
+  for (const e of list) if (WATCH_ONLY.includes(e.name.toLowerCase()) && e.url) { e.url = ''; e.formOnly = true; }
   // Taken off the scan at Ger's request (05/11/26: Pinecone's careers page shows an old job).
   const REMOVED = ['pinecone coffee'];
   for (let i = list.length - 1; i >= 0; i--) if (REMOVED.includes(list[i].name.toLowerCase())) list.splice(i, 1);
