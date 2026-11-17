@@ -1526,7 +1526,7 @@ const DEFAULT_SCAN_EMPLOYERS = [
 ];
 const SCAN_START_HOUR = 1;
 // One-off extra scan days on top of every Monday (YYYY-MM-DD, Dublin time).
-const EXTRA_SCAN_DATES = ['2026-11-03', '2026-11-04', '2026-11-14'];   // 14/11: bonus run so Saturday's new jobs and invites go out today
+const EXTRA_SCAN_DATES = ['2026-11-03', '2026-11-04', '2026-11-14', '2026-11-18'];   // 14/11 bonus run; 18/11 rerun after the invite search fix
 // Regular scan days (Dublin time): scans overnight, email lands around 8am Tue & Fri.
 const SCAN_DAYS = ['Tue', 'Fri'];
 const SCAN_EMAIL_HOUR = 8;
@@ -2244,12 +2244,29 @@ async function findInviteLeads(env, listings, state) {
   const onBoard = new Set(listings.filter(l => l.kind === 'job').map(l => norm(l.data && l.data.venue)));
   const scanned = employers.filter(e => e.url).map(e => e.name);
   const watch = employers.filter(e => !e.url || e.alsoWatch).map(e => e.name);
+  // Employers already offered as invites in the last 45 days: the search skips
+  // them so it spends its time finding new ones (17/11/26: Tuesday found none
+  // because it kept re-finding Saturday's).
+  let recent = [];
+  const recentRaw = await env.FDC_STORE.get('invite:recent-employers');
+  try { recent = JSON.parse(recentRaw || '[]'); } catch {}
+  if (recentRaw === null) {
+    // First run: start from the invites offered in the last two weeks.
+    try {
+      const keys = (await env.FDC_STORE.list({ prefix: 'scan:lead:' })).keys || [];
+      for (const k of keys.slice(0, 200)) { const l = JSON.parse((await env.FDC_STORE.get(k.name)) || 'null'); if (l && l.employer) recent.push({ name: l.employer, at: Date.now() }); }
+    } catch {}
+  }
+  recent = recent.filter(r => r && r.at > Date.now() - 45 * 864e5);
+  const recentSet = new Set(recent.map(r => norm(r.name)));
+  const boardNames = [...new Set(listings.filter(l => l.kind === 'job' && !l.flagged).map(l => l.data && l.data.venue).filter(Boolean))];
   const prompt = `You are helping Dublin Coffee Jobs, a free Irish coffee and hospitality jobs board, invite employers to list their vacancies.
 Find as many as you can, up to ${MAX_LEADS}, employers in Ireland that are hiring RIGHT NOW (ads from the last 3 weeks) for coffee, café, bakery, restaurant, bar or hotel front-line roles — barista, café staff, supervisor or manager, coffee roaster, roastery or production assistant, chef, waiting staff, bartender and similar.${seasonalOn() ? ' Temporary, seasonal and Christmas roles count too (Christmas markets, festive pop-ups, seasonal café staff).' : ''} Favour independent cafés, coffee roasters, bakeries and small groups.
 You may use job sites such as Indeed, IrishJobs, Jobs.ie or LinkedIn ONLY to see who is hiring and for what role. Do not copy anything else from them.
 Work efficiently: use job-site searches to collect several hiring employers at once, then find each one's GENERAL contact email published on the employer's OWN website (e.g. info@, hello@, jobs@, careers@). Never use a named person's email address, and never guess an address. Skip the employer if you can't find one.
 Check these first, and include any that are hiring now: ${watch.join('; ')}.
 Skip recruitment agencies and these employers: ${scanned.join('; ')}.
+Also skip these, which are already on our board or were contacted recently: ${[...boardNames, ...recent.map(r => r.name)].join('; ')}.
 Reply with ONLY a JSON array, no other text: [{"employer": "...", "role": "job title", "location": "town or county", "email": "...", "website": "https://their own site"}]`;
   let found = [];
   try {
@@ -2264,7 +2281,7 @@ Reply with ONLY a JSON array, no other text: [{"employer": "...", "role": "job t
     await env.FDC_STORE.put(offered, '1', { expirationTtl: 60 * 60 * 24 * 30 });
     manual.push(m);
   }
-  const items = [...manual, ...found];
+  const items = [...manual, ...found.filter(it => it && !recentSet.has(norm(it.employer)))];
 
   const ids = [], seen = new Set();
   for (const it of items) {
@@ -2284,7 +2301,9 @@ Reply with ONLY a JSON array, no other text: [{"employer": "...", "role": "job t
       location: String(it.location || '').trim().slice(0, 60), email, website, ...(it.noAd ? { noAd: true } : {}) };
     await env.FDC_STORE.put(`scan:lead:${id}`, JSON.stringify(lead), { expirationTtl: 60 * 60 * 24 * 14 });
     ids.push(id);
+    recent.push({ name: employer, at: Date.now() });
   }
+  await env.FDC_STORE.put('invite:recent-employers', JSON.stringify(recent.slice(-300)));
   return ids;
 }
 
