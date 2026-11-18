@@ -2235,6 +2235,8 @@ const MANUAL_INVITE_LEADS = [
     email: 'hello@southbankcafe.ie', website: 'https://southbankcafe.ie' },   // job seen by Ger 14/11/26; email from Ger
   { employer: 'Behind the Label Coffee Roasters', role: 'Roasting + Production Manager', location: 'Damastown, Dublin 15',
     email: 'darren@behindthelabel.ie', website: 'https://www.behindthelabelcoffee.ie' },   // job seen by Ger 14/11/26; email from Ger
+  { employer: "Elliot's", role: 'Barista', location: 'Dublin 7',
+    email: 'careers@elliots.ie', website: 'https://www.elliots.ie' },   // bakery café; email from Ger 18/11/26
 ];
 
 function validInviteEmail(e) {
