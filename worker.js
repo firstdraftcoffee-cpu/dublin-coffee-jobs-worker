@@ -1790,6 +1790,7 @@ function rankWords(t) {
 }
 // The town, ignoring street, district number and county: "Dublin 2" and
 // "Dublin, Smithfield" are both dublin; "Greystones, Co. Wicklow" is greystones.
+const locWords = loc => String(loc || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').split(/[^a-z]+/).filter(Boolean);
 function townKey(loc) {
   const words = String(loc || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').split(/[^a-z]+/).filter(w => w && !['co', 'county', 'the', 'city', 'centre', 'center', 'ireland'].includes(w));
   return words[0] || '';
@@ -1814,8 +1815,11 @@ function alreadyOnBoard(role, emp, listings) {
     if (isSeasonal(`${role.title} ${role.type}`) !== isSeasonal(`${l.data.title} ${l.data.type}`)) return false;
     // Same job at a different branch is a new job (17/11/26: Scéal Barista in
     // Greystones was skipped because their Dublin 2 Barista was listed).
+    // Only when the places clearly don't overlap: "Grafton Street, Dublin" and
+    // "Dublin 2" are the same place (18/11/26 fix), Greystones and Dublin aren't.
     const ta = townKey(role.location), tb = townKey(l.data.location);
-    if (ta && tb && ta !== tb) return false;
+    const la = locWords(role.location), lb = locWords(l.data.location);
+    if (ta && tb && ta !== tb && !la.includes(tb) && !lb.includes(ta)) return false;
     const lt = coreTitle(l.data.title);
     if (!ct || !lt) return false;
     if (ct === lt) return true;
