@@ -1478,6 +1478,7 @@ async function sendAlertEmail(env, { subject, text }) {
 
 const DEFAULT_SCAN_EMPLOYERS = [
   { name: "The Butler's Pantry", type: 'Food shops & bakery, Dublin', url: 'https://thebutlerspantry.ie/careers/' },   // from Ger 14/11/26; jobs listed on their own site
+  { name: "Elliot's", type: 'Bakery café, Dublin 7', url: 'https://www.elliots.ie/careers' },   // from Ger 18/11/26; bakers listed on their own page
   { name: 'Insomnia Coffee Company', type: 'Café chain', url: 'https://api.occupop.com/api/jobs-frame/urV593LGChLdVuTZF1RVKNFOCYqXgWWeafinbwpeJ782LQaNNn?&search=1&visibility=external&fields=title,type,location', alsoWatch: true },   // 14/11/26: reads the Occupop job list that insomnia.ie/careers embeds; still on the invite watch list as backup
   { name: 'EUROSPAR Prendergast Group', type: 'Retail coffee counters', url: 'https://eurosparcareers.recruitee.com' },
   { name: 'Centra', type: 'Retail coffee counters (each shop hires itself)', url: '', formOnly: true },
@@ -2235,7 +2236,7 @@ const MANUAL_INVITE_LEADS = [
     email: 'hello@southbankcafe.ie', website: 'https://southbankcafe.ie' },   // job seen by Ger 14/11/26; email from Ger
   { employer: 'Behind the Label Coffee Roasters', role: 'Roasting + Production Manager', location: 'Damastown, Dublin 15',
     email: 'darren@behindthelabel.ie', website: 'https://www.behindthelabelcoffee.ie' },   // job seen by Ger 14/11/26; email from Ger
-  { employer: "Elliot's", role: 'Barista', location: 'Dublin 7',
+  { employer: "Elliot's", role: 'Baker', location: 'Dublin 7',
     email: 'careers@elliots.ie', website: 'https://www.elliots.ie' },   // bakery café; email from Ger 18/11/26
 ];
 
