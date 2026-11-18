@@ -2912,12 +2912,12 @@ async function runWeeklyStoryEmail(env, now = new Date()) {
   } catch {}
   const [y, m, d] = t.date.split('-');
   if (ready) {
-    const text = `This week's jobs video is ready for your Instagram Story:\n${url}\n\n1. Open the link on your phone and save the video.\n2. Add it to your Story.\n3. Add a link sticker to dublincoffeejobs.com/job-board.html.\n\nThanks!\nDublin Coffee Jobs`;
+    const text = `This week's jobs video is ready for your Instagram Story:\n${url}\n\n1. Open the link on your phone to download the video (iPhone: open the download, tap share, Save Video).\n2. Add it to your Story.\n3. Add a link sticker to dublincoffeejobs.com/job-board.html.\n\nThanks!\nDublin Coffee Jobs`;
     const html = `<div style="font-family:Arial,sans-serif;font-size:16px;line-height:1.6;color:#16130E;max-width:520px">
 <p style="font-family:monospace;font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:#B8451E;margin:0 0 8px">Dublin Coffee Jobs · ${d}/${m}/${y.slice(2)}</p>
 <h2 style="margin:0 0 12px;font-size:24px">This week's jobs video is ready</h2>
-<p><a href="${url}" style="display:inline-block;background:#B8451E;color:#fff;text-decoration:none;font-weight:bold;padding:12px 24px;border-radius:100px">Open the video</a></p>
-<ol style="padding-left:20px"><li>Open it on your phone and save the video.</li><li>Add it to your Story.</li><li>Add a link sticker to <strong>dublincoffeejobs.com/job-board.html</strong>.</li></ol>
+<p><a href="${url}" style="display:inline-block;background:#B8451E;color:#fff;text-decoration:none;font-weight:bold;padding:12px 24px;border-radius:100px">Download the video</a></p>
+<ol style="padding-left:20px"><li>Tap Download on your phone. On iPhone, open the download, tap the share icon and choose Save Video.</li><li>Add it to your Story.</li><li>Add a link sticker to <strong>dublincoffeejobs.com/job-board.html</strong>.</li></ol>
 <p style="color:#6b6157;font-size:13px">It shows up to 6 of the jobs added in the last 7 days, coffee jobs first.</p></div>`;
     await sendEmailHtml(env, env.ALERT_EMAIL_TO, "This week's jobs video is ready", text, html);
     await env.FDC_STORE.put(flag, '1', { expirationTtl: 60 * 60 * 24 * 8 });
