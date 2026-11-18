@@ -2356,7 +2356,7 @@ async function sendInvite(lead, env) {
   await env.FDC_STORE.put(`invite:${inv.id}`, JSON.stringify(inv), { expirationTtl: 60 * 60 * 24 * 60 });
   await env.FDC_STORE.put(`invite:sent:${lead.email}`, String(Date.now()), { expirationTtl: 60 * 60 * 24 * 90 });
   // Keeps the "don't email me again" link working for a year, after the invite itself expires.
-  await env.FDC_STORE.put(`invite:stop:${inv.id}`, JSON.stringify({ token: inv.token, email: lead.email }), { expirationTtl: 60 * 60 * 24 * 365 });
+  await env.FDC_STORE.put(`invite:stop:${inv.id}`, JSON.stringify({ token: inv.token, email: lead.email, employer: lead.employer, role: lead.noAd ? "" : lead.role, location: lead.location || "" }), { expirationTtl: 60 * 60 * 24 * 365 });
   await env.FDC_STORE.delete(`scan:lead:${lead.id}`);
   await sendEmailTo(env, lead.email, lead.noAd ? 'Free job listings on Dublin Coffee Jobs' : `Your ${lead.role} vacancy: free listing on Dublin Coffee Jobs?`,
     inviteEmailText(lead, inv, env), env.INVITE_REPLY_TO || env.ALERT_EMAIL_TO);
@@ -2404,9 +2404,22 @@ async function handleInviteRoute(path, request, url, env, ctx) {
   const loadInvite = async (id, t) => {
     if (!id || !t) return null;
     const raw = await env.FDC_STORE.get(`invite:${id}`);
-    if (!raw) return null;
-    const inv = JSON.parse(raw);
-    return inv.token === t ? inv : null;
+    if (raw) { const inv = JSON.parse(raw); return inv.token === t ? inv : null; }
+    // Until 18/11/26 an email security checker opening the unsubscribe link
+    // cancelled the invite. If the employer then taps "yes", bring it back
+    // (blank form) and undo that unsubscribe: they clearly want to hear from us.
+    const stopRaw = await env.FDC_STORE.get(`invite:stop:${id}`);
+    if (!stopRaw) return null;
+    const st = JSON.parse(stopRaw);
+    if (st.token !== t) return null;
+    const inv = { id, token: t, employer: st.employer || '', role: st.role || '', location: st.location || '', email: st.email, recovered: true };
+    await env.FDC_STORE.put(`invite:${id}`, JSON.stringify(inv), { expirationTtl: 60 * 60 * 24 * 60 });
+    if (st.email) {
+      await env.FDC_STORE.delete(`invite:optout:${st.email}`);
+      const domain = '@' + st.email.split('@')[1];
+      if (!/@(gmail|yahoo|hotmail|outlook|icloud|live|eircom)\./.test(domain)) await env.FDC_STORE.delete(`invite:optout:${domain}`);
+    }
+    return inv;
   };
   const sentAlready = () => scanPage('Already done', () => `<h1>Nothing to send here</h1><p>This invite has already been sent, or the link is more than 14 days old.</p>`);
   const leadCard = (esc, l) => `<div class="card"><strong>${esc(l.employer)}</strong> — ${esc(l.role)}<div class="meta">${esc([l.location, l.email].filter(Boolean).join(' · '))}</div>${l.website ? `<div class="meta"><a href="${esc(l.website)}" target="_blank" rel="noopener nofollow">${esc(l.website)}</a></div>` : ''}</div>`;
@@ -2491,7 +2504,14 @@ ${rows.map(r => `<div class="card"><strong>${esc(r.l.employer)}</strong><div cla
     return scanPage('Live', esc => `<h1>You're live ✓</h1><p><strong>${esc(v.title)}</strong> at ${esc(v.venue)} is on Dublin Coffee Jobs now and going out on Instagram and Facebook.</p><p><a href="${site}/job-board.html?id=${esc(id)}">See your listing</a></p><p class="meta">Got more roles? Post them free any time at <a href="${site}/job-board.html">dublincoffeejobs.com</a>.</p>`);
   }
   if (path === '/invite/stop' && request.method === 'GET') {
-    const id = url.searchParams.get('id'), t = url.searchParams.get('t');
+    // Only shows a button: email security checkers open every link in an email,
+    // and used to unsubscribe employers by accident (18/11/26).
+    const id = url.searchParams.get('id') || '', t = url.searchParams.get('t') || '';
+    return scanPage('Unsubscribe', esc => `<h1>Stop emails from Dublin Coffee Jobs?</h1><p>Tap below and we won't email you again.</p><form method="POST" action="/invite/stop"><input type="hidden" name="id" value="${esc(id)}"><input type="hidden" name="t" value="${esc(t)}"><button type="submit" class="btn">Unsubscribe</button></form>`);
+  }
+  if (path === '/invite/stop' && request.method === 'POST') {
+    const form = await request.formData();
+    const id = String(form.get('id') || ''), t = String(form.get('t') || '');
     let email = '';
     const stopRaw = id && t ? await env.FDC_STORE.get(`invite:stop:${id}`) : null;
     if (stopRaw) { const st = JSON.parse(stopRaw); if (st.token === t) email = st.email; }
