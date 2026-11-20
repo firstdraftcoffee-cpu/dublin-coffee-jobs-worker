@@ -886,6 +886,12 @@ Brew method: ${method}. Problem: ${issue}`;
       if (raw) listings.push(JSON.parse(raw));
     }
 
+    // One-off (20/11/26): can our Instagram connection read other business
+    // accounts' recent posts? Emails Ger the answer once, then never runs again.
+    if (!(event && event.cron && event.cron !== '0 * * * *')) {
+      try { await runInstagramAccessTest(env); } catch (e) { console.error('IG test:', String(e)); }
+    }
+
     // Extra 10-minute trigger: only moves the scan along faster (it has more
     // searching to do since 20/11/26). Does nothing else.
     if (event && event.cron && event.cron !== '0 * * * *') {
@@ -1088,6 +1094,33 @@ function contactRevealText(d) {
 // Every job post also tells employers they can post for free (20/11/26).
 function hiringLine(env) {
   return `\n\nHiring? ${isFreeLaunch(env) ? 'Post your job free until the new year' : 'Post your job'}: ${env.SITE_URL}/job-board.html`;
+}
+
+async function runInstagramAccessTest(env) {
+  if (!env.IG_USER_ID || !env.FB_PAGE_ACCESS_TOKEN || !env.ALERT_EMAIL_TO) return;
+  if (await env.FDC_STORE.get('igtest:done')) return;
+  await env.FDC_STORE.put('igtest:done', '1', { expirationTtl: 60 * 60 * 24 * 30 });
+  const lines = [];
+  let worked = 0;
+  for (const handle of ['instagram', 'scealbakery', '3fecoffee']) {
+    const fields = `business_discovery.username(${handle}){username,followers_count,media.limit(5){caption,timestamp,permalink}}`;
+    try {
+      const res = await fetch(`https://graph.facebook.com/v19.0/${env.IG_USER_ID}?fields=${encodeURIComponent(fields)}&access_token=${env.FB_PAGE_ACCESS_TOKEN}`);
+      const j = await res.json().catch(() => ({}));
+      const bd = j.business_discovery;
+      if (bd && bd.media) {
+        worked++;
+        const latest = (bd.media.data || [])[0];
+        lines.push(`@${handle}: worked. Read ${(bd.media.data || []).length} recent posts${latest ? `, latest from ${String(latest.timestamp || '').slice(0, 10)}: "${String(latest.caption || '').slice(0, 80)}"` : ''}.`);
+      } else {
+        const err = j.error || {};
+        lines.push(`@${handle}: didn't work. Meta said: ${err.message || 'no reason given'} (code ${err.code || '?'}${err.error_subcode ? '/' + err.error_subcode : ''}).`);
+      }
+    } catch (e) { lines.push(`@${handle}: couldn't reach Meta (${String(e).slice(0, 100)}).`); }
+  }
+  const verdict = worked ? 'Good news: Meta lets us read other cafés\' recent Instagram posts. Tell Claude it worked and the daily Instagram check can be built.'
+    : 'Meta didn\'t let us read other accounts\' posts this way. Send this email to Claude: the reasons below say what would be needed.';
+  await sendEmailTo(env, env.ALERT_EMAIL_TO, worked ? 'Instagram test: it works' : 'Instagram test: not allowed yet', `${verdict}\n\n${lines.join('\n')}`);
 }
 
 function listingCaption(record, env) {
