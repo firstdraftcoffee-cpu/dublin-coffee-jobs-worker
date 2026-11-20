@@ -877,12 +877,22 @@ Brew method: ${method}. Problem: ${issue}`;
   },
 
   async scheduled(event, env, ctx) {
+    if (event && event.cron && event.cron !== '0 * * * *' && !RERUN_DATES[dublinNow(new Date()).date]) return;
     const alertList = await env.FDC_STORE.list({ prefix: 'alert:' });
     const listingList = await env.FDC_STORE.list({ prefix: 'listing:' });
     const listings = [];
     for (const key of listingList.keys) {
       const raw = await env.FDC_STORE.get(key.name);
       if (raw) listings.push(JSON.parse(raw));
+    }
+
+    // Extra 10-minute trigger: only moves a same-day rerun along faster
+    // (20/11/26: Ger wanted the fresh scan's email sooner). Does nothing else.
+    if (event && event.cron && event.cron !== '0 * * * *') {
+      if (RERUN_DATES[dublinNow(new Date()).date]) {
+        try { await runJobScan(env, listings); } catch (e) { console.error('Job scan error:', String(e)); }
+      }
+      return;
     }
 
     for (const key of alertList.keys) {
