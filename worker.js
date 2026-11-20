@@ -1527,7 +1527,7 @@ const DEFAULT_SCAN_EMPLOYERS = [
 ];
 const SCAN_START_HOUR = 1;
 // One-off extra scan days on top of every Monday (YYYY-MM-DD, Dublin time).
-const EXTRA_SCAN_DATES = ['2026-11-03', '2026-11-04', '2026-11-14', '2026-11-18'];   // 14/11 bonus run; 18/11 rerun after the invite search fix
+const EXTRA_SCAN_DATES = ['2026-11-03', '2026-11-04', '2026-11-14', '2026-11-18', '2026-11-21'];   // 14/11 bonus run; 18/11 rerun after the invite search fix
 // Regular scan days (Dublin time): scans overnight, email lands around 8am Tue & Fri.
 const SCAN_DAYS = ['Tue', 'Fri'];
 const SCAN_EMAIL_HOUR = 8;
@@ -1915,7 +1915,7 @@ async function callClaudeWithSearch(prompt, env, maxUses = 6) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({
-        model: 'claude-sonnet-5', max_tokens: 4000, messages,
+        model: 'claude-sonnet-5', max_tokens: 8000, messages,
         // No location setting: Ireland isn't a supported country for it, and the prompts already ask for Irish employers.
         tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: maxUses }],
       }),
@@ -2262,7 +2262,7 @@ async function findInviteLeads(env, listings, state) {
   const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
   const onBoard = new Set(listings.filter(l => l.kind === 'job').map(l => norm(l.data && l.data.venue)));
   const scanned = employers.filter(e => e.url).map(e => e.name);
-  const watch = employers.filter(e => !e.url || e.alsoWatch).map(e => e.name);
+  // (watch list is built below, once we know who was contacted recently)
   // Employers already offered as invites in the last 45 days: the search skips
   // them so it spends its time finding new ones (17/11/26: Tuesday found none
   // because it kept re-finding Saturday's).
@@ -2279,11 +2279,15 @@ async function findInviteLeads(env, listings, state) {
   recent = recent.filter(r => r && r.at > Date.now() - 45 * 864e5);
   const recentSet = new Set(recent.map(r => norm(r.name)));
   const boardNames = [...new Set(listings.filter(l => l.kind === 'job' && !l.flagged).map(l => l.data && l.data.venue).filter(Boolean))];
+  // 20/11/26: the search found nobody new because "check these first" listed
+  // employers already invited or already on the board, so it spent its searches
+  // re-finding them and they were then dropped. Only watch the ones still worth asking.
+  const watch = employers.filter(e => !e.url && !recentSet.has(norm(e.name)) && !onBoard.has(norm(e.name))).map(e => e.name);
   const prompt = `You are helping Dublin Coffee Jobs, a free Irish coffee and hospitality jobs board, invite employers to list their vacancies.
 Find as many as you can, up to ${MAX_LEADS}, employers in Ireland that are hiring RIGHT NOW (ads from the last 3 weeks) for coffee, café, bakery, restaurant, bar or hotel front-line roles — barista, café staff, supervisor or manager, coffee roaster, roastery or production assistant, chef, waiting staff, bartender and similar.${seasonalOn() ? ' Temporary, seasonal and Christmas roles count too (Christmas markets, festive pop-ups, seasonal café staff).' : ''} Favour independent cafés, coffee roasters, bakeries and small groups.
 You may use job sites such as Indeed, IrishJobs, Jobs.ie or LinkedIn ONLY to see who is hiring and for what role. Do not copy anything else from them.
 Work efficiently: use job-site searches to collect several hiring employers at once, then find each one's GENERAL contact email published on the employer's OWN website (e.g. info@, hello@, jobs@, careers@). Never use a named person's email address, and never guess an address. Skip the employer if you can't find one.
-Check these first, and include any that are hiring now: ${watch.join('; ')}.
+${watch.length ? `Also check these, and include any that are hiring now: ${watch.join('; ')}.\n` : ''}Most of your answer should be NEW employers not named anywhere in this message: aim for at least 8.
 Skip recruitment agencies and these employers: ${scanned.join('; ')}.
 Also skip these, which are already on our board or were contacted recently: ${[...boardNames, ...recent.map(r => r.name)].join('; ')}.
 Reply with ONLY a JSON array, no other text: [{"employer": "...", "role": "job title", "location": "town or county", "email": "...", "website": "https://their own site"}]`;
@@ -2300,6 +2304,8 @@ Reply with ONLY a JSON array, no other text: [{"employer": "...", "role": "job t
     await env.FDC_STORE.put(offered, '1', { expirationTtl: 60 * 60 * 24 * 30 });
     manual.push(m);
   }
+  const why = { recent: [], email: [], board: [], sent: [], optout: [] };
+  for (const it of found) if (it && recentSet.has(norm(it.employer))) why.recent.push(it.employer);
   const items = [...manual, ...found.filter(it => it && !recentSet.has(norm(it.employer)))];
 
   const ids = [], seen = new Set();
@@ -2308,11 +2314,12 @@ Reply with ONLY a JSON array, no other text: [{"employer": "...", "role": "job t
     const email = validInviteEmail(it && it.email);
     const employer = String((it && it.employer) || '').trim().slice(0, 80);
     const role = String((it && it.role) || '').trim().slice(0, 80);
+    if (!email && employer) { why.email.push(employer); continue; }
     if (!email || !employer || !role || seen.has(email)) continue;
     seen.add(email);
-    if (onBoard.has(norm(employer))) continue;
-    if (await isOptedOut(email, env)) continue;
-    if (await env.FDC_STORE.get(`invite:sent:${email}`)) continue;
+    if (onBoard.has(norm(employer))) { why.board.push(employer); continue; }
+    if (await isOptedOut(email, env)) { why.optout.push(employer); continue; }
+    if (await env.FDC_STORE.get(`invite:sent:${email}`)) { why.sent.push(employer); continue; }
     let website = cleanUrl(it.website);
     if (website && BLOCKED_JOB_SITES.test(new URL(website).hostname)) website = '';
     const id = crypto.randomUUID();
@@ -2323,6 +2330,11 @@ Reply with ONLY a JSON array, no other text: [{"employer": "...", "role": "job t
     recent.push({ name: employer, at: Date.now() });
   }
   await env.FDC_STORE.put('invite:recent-employers', JSON.stringify(recent.slice(-300)));
+  const list = (label, a) => a.length ? ` ${a.length} ${label} (${a.slice(0, 6).join(', ')}${a.length > 6 ? '…' : ''}).` : '';
+  state.notes.push(`Invite search: found ${found.length} employer${found.length === 1 ? '' : 's'} hiring.` +
+    list('already invited recently', why.recent) + list('had no general email address', why.email) +
+    list('already on the board', why.board) + list('invited before', why.sent) + list('asked not to be contacted', why.optout) +
+    (found.length === 0 ? ' The search came back empty.' : ''));
   return ids;
 }
 
