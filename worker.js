@@ -1525,10 +1525,11 @@ const DEFAULT_SCAN_EMPLOYERS = [
 ];
 const SCAN_START_HOUR = 1;
 // One-off extra scan days on top of every Monday (YYYY-MM-DD, Dublin time).
-const EXTRA_SCAN_DATES = ['2026-11-03', '2026-11-04', '2026-11-14', '2026-11-18', '2026-11-21'];   // 14/11 bonus run; 18/11 rerun after the invite search fix
+const EXTRA_SCAN_DATES = ['2026-11-03', '2026-11-04', '2026-11-14', '2026-11-18'];   // 14/11 bonus run; 18/11 rerun after the invite search fix
 // Regular scan days (Dublin time): scans overnight, email lands around 8am Tue & Fri.
 const SCAN_DAYS = ['Tue', 'Fri'];
 const SCAN_EMAIL_HOUR = 8;
+const RERUN_DATES = { '2026-11-20': '-2' };   // date -> suffix: starts a fresh run that day
 const BLOCKED_JOB_SITES = /(^|\.)(indeed\.|linkedin\.|jobs\.ie|irishjobs\.ie|jobsireland\.ie|glassdoor\.|ziprecruiter\.|simplyhired\.|jobijoba\.|cv-library\.|recruitireland\.|monster\.)/i;
 
 function dublinNow(now = new Date()) {
@@ -1589,10 +1590,12 @@ async function runJobScan(env, listings, now = new Date()) {
 
   const stateRaw = await env.FDC_STORE.get('scan:state');
   let state = stateRaw ? JSON.parse(stateRaw) : null;
-  if (!state || state.week !== t.date) {
+  // A second run on a date already scanned (Ger asked for a fresh scan 20/11/26 at 08:54).
+  const runKey = t.date + (RERUN_DATES[t.date] || '');
+  if (!state || state.week !== runKey) {
     // Keep last run's state for 14 days so its "Post all" / "Invite all" links still work.
     if (state) await env.FDC_STORE.put(`scan:state:${state.week}`, JSON.stringify(state), { expirationTtl: 60 * 60 * 24 * 14 });
-    state = { week: t.date, phase: 'scan', cursor: 0, drafts: [], allToken: randomToken(), notes: [], addedEmployers: [], leads: [] };
+    state = { week: runKey, phase: 'scan', cursor: 0, drafts: [], allToken: randomToken(), notes: [], addedEmployers: [], leads: [] };
   }
   const save = () => env.FDC_STORE.put('scan:state', JSON.stringify(state), { expirationTtl: 60 * 60 * 24 * 14 });
 
