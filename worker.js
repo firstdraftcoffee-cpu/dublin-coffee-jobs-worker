@@ -1502,10 +1502,8 @@ const DEFAULT_SCAN_EMPLOYERS = [
   // Added 03/11/26 — big readable careers sites (capped at 3 roles a week each in the email).
   { name: 'Dalata Hotel Group (Clayton & Maldron hotels)', type: 'Hotels', url: 'https://careers.dalatahotelgroup.com/jobs',
     pages: { template: 'https://careers.dalatahotelgroup.com/jobs?paged={p}', from: 2, step: 1, count: 5 } },
-  { name: 'Boojum', type: 'Burrito restaurants', url: 'https://boojumltd.teamtailor.com/jobs' },
   { name: 'The Natural Bakery', type: 'Bakery-cafés', url: 'https://thenaturalbakery.ie/careers/' },
   { name: 'Twobeans Speciality Coffee Bar (Dún Laoghaire)', type: 'Specialty coffee', url: 'https://www.twobeans.ie/jobs' },
-  { name: 'Ground Coffee (Northern Ireland)', type: 'Coffee shops', url: 'https://groundcoffee.net/work-us/' },
   { name: "Bewley's Grafton Street", type: 'Café', url: 'https://bewleysgraftonstreet.com/work-with-us/' },
   { name: 'Avoca', type: 'Cafés & food halls', url: 'https://avoca.com/pages/careers-at-avoca', alsoWatch: true },   // jobs load in after the page opens
   { name: 'Bodega (Howth)', type: 'Specialty coffee', url: 'https://www.bodega.ie/hiring' },
@@ -1554,6 +1552,10 @@ function cleanUrl(u) {
   } catch { return ''; }
 }
 
+// Taken off the scan, and never offered as invites, at Ger's request
+// (05/11/26 Pinecone: careers page shows an old job; 20/11/26 Boojum, Ground Coffee).
+const REMOVED_EMPLOYERS = /^\s*(pinecone coffee|boojum|ground coffee)\b/i;
+
 async function getScanEmployers(env) {
   const raw = await env.FDC_STORE.get('scan:employers');
   const list = raw ? JSON.parse(raw) : [];
@@ -1563,9 +1565,6 @@ async function getScanEmployers(env) {
   // Careers pages that can't be read: watched for invites instead of scanned.
   const WATCH_ONLY = ['centra', 'mocha beans (galway)', 'compass group ireland (gather & gather)'];
   for (const e of list) if (WATCH_ONLY.includes(e.name.toLowerCase()) && e.url) { e.url = ''; e.formOnly = true; }
-  // Taken off the scan at Ger's request (05/11/26: Pinecone's careers page shows an old job).
-  const REMOVED = ['pinecone coffee'];
-  for (let i = list.length - 1; i >= 0; i--) if (REMOVED.includes(list[i].name.toLowerCase())) list.splice(i, 1);
   // A careers link added to the built-in list fills in a saved entry that had none.
   const byName = new Map(list.map(e => [e.name.toLowerCase(), e]));
   for (const d of DEFAULT_SCAN_EMPLOYERS) {
@@ -1578,6 +1577,7 @@ async function getScanEmployers(env) {
   }
   const have = new Set(list.map(e => e.name.toLowerCase()));
   for (const e of DEFAULT_SCAN_EMPLOYERS) if (!have.has(e.name.toLowerCase())) list.push({ ...e });
+  for (let i = list.length - 1; i >= 0; i--) if (REMOVED_EMPLOYERS.test(list[i].name)) list.splice(i, 1);
   return list;
 }
 
@@ -2288,7 +2288,7 @@ Find as many as you can, up to ${MAX_LEADS}, employers in Ireland that are hirin
 You may use job sites such as Indeed, IrishJobs, Jobs.ie or LinkedIn ONLY to see who is hiring and for what role. Do not copy anything else from them.
 Work efficiently: use job-site searches to collect several hiring employers at once, then find each one's GENERAL contact email published on the employer's OWN website (e.g. info@, hello@, jobs@, careers@). Never use a named person's email address, and never guess an address. Skip the employer if you can't find one.
 ${watch.length ? `Also check these, and include any that are hiring now: ${watch.join('; ')}.\n` : ''}Most of your answer should be NEW employers not named anywhere in this message: aim for at least 8.
-Skip recruitment agencies and these employers: ${scanned.join('; ')}.
+Skip recruitment agencies and these employers: ${[...scanned, 'Pinecone Coffee', 'Boojum', 'Ground Coffee'].join('; ')}.
 Also skip these, which are already on our board or were contacted recently: ${[...boardNames, ...recent.map(r => r.name)].join('; ')}.
 Reply with ONLY a JSON array, no other text: [{"employer": "...", "role": "job title", "location": "town or county", "email": "...", "website": "https://their own site"}]`;
   let found = [];
@@ -2306,7 +2306,7 @@ Reply with ONLY a JSON array, no other text: [{"employer": "...", "role": "job t
   }
   const why = { recent: [], email: [], board: [], sent: [], optout: [] };
   for (const it of found) if (it && recentSet.has(norm(it.employer))) why.recent.push(it.employer);
-  const items = [...manual, ...found.filter(it => it && !recentSet.has(norm(it.employer)))];
+  const items = [...manual, ...found.filter(it => it && !recentSet.has(norm(it.employer)) && !REMOVED_EMPLOYERS.test(String(it.employer || '')))];
 
   const ids = [], seen = new Set();
   for (const it of items) {
