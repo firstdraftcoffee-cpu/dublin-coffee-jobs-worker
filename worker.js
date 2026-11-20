@@ -877,7 +877,7 @@ Brew method: ${method}. Problem: ${issue}`;
   },
 
   async scheduled(event, env, ctx) {
-    if (event && event.cron && event.cron !== '0 * * * *' && !RERUN_DATES[dublinNow(new Date()).date]) return;
+    if (event && event.cron && event.cron !== '0 * * * *' && !isScanDay(dublinNow(new Date()))) return;
     const alertList = await env.FDC_STORE.list({ prefix: 'alert:' });
     const listingList = await env.FDC_STORE.list({ prefix: 'listing:' });
     const listings = [];
@@ -886,12 +886,10 @@ Brew method: ${method}. Problem: ${issue}`;
       if (raw) listings.push(JSON.parse(raw));
     }
 
-    // Extra 10-minute trigger: only moves a same-day rerun along faster
-    // (20/11/26: Ger wanted the fresh scan's email sooner). Does nothing else.
+    // Extra 10-minute trigger: only moves the scan along faster (it has more
+    // searching to do since 20/11/26). Does nothing else.
     if (event && event.cron && event.cron !== '0 * * * *') {
-      if (RERUN_DATES[dublinNow(new Date()).date]) {
-        try { await runJobScan(env, listings); } catch (e) { console.error('Job scan error:', String(e)); }
-      }
+      try { await runJobScan(env, listings); } catch (e) { console.error('Job scan error:', String(e)); }
       return;
     }
 
@@ -1087,16 +1085,21 @@ function contactRevealText(d) {
 
 // One wording for every listing type, used by both the automatic
 // Facebook Page / Instagram post and the Group paste email.
+// Every job post also tells employers they can post for free (20/11/26).
+function hiringLine(env) {
+  return `\n\nHiring? ${isFreeLaunch(env) ? 'Post your job free until the new year' : 'Post your job'}: ${env.SITE_URL}/job-board.html`;
+}
+
 function listingCaption(record, env) {
   const d = record.data || {};
   const join = (...parts) => parts.filter(p => p && String(p).trim()).join(' · ');
   if (record.kind === 'job' && record.roundup) {
     const url = `${env.SITE_URL}/job-board.html?id=${record.id}`;
-    return { url, title: d.title, text: `Now hiring: ${d.venue}\n${d.roundupLine || ''}\n\nSee the roles: ${url}` };
+    return { url, title: d.title, text: `Now hiring: ${d.venue}\n${d.roundupLine || ''}\n\nSee the roles: ${url}${hiringLine(env)}` };
   }
   if (record.kind === 'job') {
     const url = `${env.SITE_URL}/job-board.html?id=${record.id}`;
-    return { url, title: d.title, text: `New job: ${d.title} at ${d.venue}\n${join(d.location, d.salary, d.type)}\n\nApply: ${url}` };
+    return { url, title: d.title, text: `New job: ${d.title} at ${d.venue}\n${join(d.location, d.salary, d.type)}\n\nApply: ${url}${hiringLine(env)}` };
   }
   const url = `${env.SITE_URL}/shift-cover.html?id=${record.id}`;
   if (record.kind === 'shift_available') {
@@ -1537,9 +1540,10 @@ const SCAN_START_HOUR = 1;
 // One-off extra scan days on top of every Monday (YYYY-MM-DD, Dublin time).
 const EXTRA_SCAN_DATES = ['2026-11-03', '2026-11-04', '2026-11-14', '2026-11-18'];   // 14/11 bonus run; 18/11 rerun after the invite search fix
 // Regular scan days (Dublin time): scans overnight, email lands around 8am Tue & Fri.
-const SCAN_DAYS = ['Tue', 'Fri'];
+const SCAN_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'];   // every weekday from 23/11/26 (was Tue + Fri)
 const SCAN_EMAIL_HOUR = 8;
-const RERUN_DATES = { '2026-11-20': '-2' };   // date -> suffix: starts a fresh run that day
+const RERUN_DATES = {};
+const isScanDay = t => SCAN_DAYS.includes(t.weekday) || EXTRA_SCAN_DATES.includes(t.date) || !!RERUN_DATES[t.date];   // date -> suffix: starts a fresh run that day
 const BLOCKED_JOB_SITES = /(^|\.)(indeed\.|linkedin\.|jobs\.ie|irishjobs\.ie|jobsireland\.ie|glassdoor\.|ziprecruiter\.|simplyhired\.|jobijoba\.|cv-library\.|recruitireland\.|monster\.)/i;
 
 function dublinNow(now = new Date()) {
@@ -1596,7 +1600,7 @@ async function getScanEmployers(env) {
 async function runJobScan(env, listings, now = new Date()) {
   if (!env.ANTHROPIC_API_KEY || !env.ALERT_EMAIL_TO) return;
   const t = dublinNow(now);
-  if ((!SCAN_DAYS.includes(t.weekday) && !EXTRA_SCAN_DATES.includes(t.date)) || t.hour < SCAN_START_HOUR) return;
+  if (!isScanDay(t) || t.hour < SCAN_START_HOUR) return;
 
   const stateRaw = await env.FDC_STORE.get('scan:state');
   let state = stateRaw ? JSON.parse(stateRaw) : null;
@@ -1608,6 +1612,10 @@ async function runJobScan(env, listings, now = new Date()) {
     state = { week: runKey, phase: 'scan', cursor: 0, drafts: [], allToken: randomToken(), notes: [], addedEmployers: [], leads: [] };
   }
   const save = () => env.FDC_STORE.put('scan:state', JSON.stringify(state), { expirationTtl: 60 * 60 * 24 * 14 });
+  // One step at a time: the hourly and 10-minute triggers must never work on the same step.
+  if (state.phase !== 'emailed' && state.busyAt && Date.now() - state.busyAt < 9 * 60e3) return;
+  if (state.phase !== 'emailed' && !(state.phase === 'ready' && t.hour < SCAN_EMAIL_HOUR)) { state.busyAt = Date.now(); await save(); }
+  const done = async () => { state.busyAt = 0; await save(); };
 
   if (state.phase === 'scan') {
     // Only employers with a careers link need scanning (the rest are found by
@@ -1632,7 +1640,7 @@ async function runJobScan(env, listings, now = new Date()) {
     }
     state.cursor += batch;
     if (state.cursor >= employers.length) state.phase = 'discover';
-    await save();
+    await done();
     return;
   }
 
@@ -1644,19 +1652,26 @@ async function runJobScan(env, listings, now = new Date()) {
       state.notes.push(`Couldn't search for new employers this time. Reason: ${String(e.message || e).slice(0, 220)}`);
     }
     state.phase = isFreeLaunch(env) ? 'leads' : 'ready';
-    await save();
+    await done();
     return;
   }
 
   if (state.phase === 'leads') {
+    // Several smaller searches, one per step, each aimed at a different kind
+    // of employer (20/11/26: one big search only ever found ~7).
+    const step = state.leadStep || 0;
     try {
-      state.leads = await findInviteLeads(env, listings, state);
+      const ids = await findInviteLeads(env, listings, state, step);
+      state.leads = [...(state.leads || []), ...ids];
     } catch (e) {
       console.error('Invite lead search failed:', String(e));
-      state.notes.push(`Couldn't look for employers to invite this time. Reason: ${String(e.message || e).slice(0, 220)}`);
+      state.notes.push(`Invite search (${inviteFocuses()[step].label}) didn't work this time. Reason: ${String(e.message || e).slice(0, 200)}`);
     }
+    state.leadStep = step + 1;
+    if (state.leadStep < inviteFocuses().length) { await done(); return; }
+    finishInviteNote(state);
     state.phase = 'ready';
-    await save();
+    await done();
     return;
   }
 
@@ -1664,7 +1679,7 @@ async function runJobScan(env, listings, now = new Date()) {
     try { state.numbers = await weeklyNumbers(env, listings); } catch (e) { state.numbers = null; }
     await sendScanEmail(state, env);
     state.phase = 'emailed';
-    await save();
+    await done();
   }
 }
 
@@ -1878,7 +1893,7 @@ async function discoverEmployers(env) {
   const known = employers.map(e => e.name);
   const prompt = `You are building a list of employers for a coffee and hospitality jobs board in Ireland.
 Task 1: find the employer's OWN careers or jobs page for each of these: ${missing.length ? missing.join('; ') : '(none)'}. It must be a page that lists individual open roles (on their own site or their own hiring platform). If they only have a general "send us your CV" form, include them with "formOnly": true.
-Task 2: find up to 10 MORE employers based in Ireland that hire baristas, café, coffee or hospitality staff AND have their own careers page: specialty coffee roasters, café groups, bakery-café chains, hotel groups, contract caterers. Do not repeat any of these: ${known.join('; ')}.
+Task 2: find up to 4 MORE INDEPENDENT employers based in Ireland (specialty cafés, coffee roasters, bakeries, bakery-cafés, small restaurant groups) that hire coffee, café or hospitality staff AND have their own page listing open roles ("careers", "work with us", "join the team"). Not big chains or hotel groups: we have enough of those. Do not repeat any of these: ${known.join('; ')}.
 Only use the employer's own website or their own hiring page. Hiring platform pages are best (Workable, Recruitee, Greenhouse, Lever, BambooHR, SmartRecruiters, Personio, Teamtailor): if the careers page sends people to one, give that platform link. Never use Indeed, LinkedIn, Jobs.ie, IrishJobs, JobsIreland, Glassdoor or recruitment agencies.
 When finished, reply with ONLY a JSON array, no other text: [{"name": "...", "type": "short description", "url": "https://...", "formOnly": false}], including Task 1 results under their exact names above. Leave out any employer whose careers page you could not find.`;
 
@@ -1907,7 +1922,7 @@ When finished, reply with ONLY a JSON array, no other text: [{"name": "...", "ty
       if (!existing.url) { existing.url = url; added.push(`${name} (careers page found)`); hosts.add(host); }
       continue;
     }
-    if (hosts.has(host) || added.length >= 14) continue;
+    if (hosts.has(host) || added.length >= 8) continue;
     const emp = { name, type: String(it.type || '').slice(0, 60), url };
     employers.push(emp); byName.set(name.toLowerCase(), emp); hosts.add(host);
     added.push(name);
@@ -2016,7 +2031,7 @@ async function sendScanEmail(state, env) {
   const text = [];
   html.push(`<div style="font-family:-apple-system,Segoe UI,Helvetica,Arial,sans-serif;background:#f5efe6;padding:20px 14px;color:#161310;"><div style="max-width:560px;margin:0 auto;">
 <p style="margin:0;color:#b4532a;font-size:12px;letter-spacing:.08em;text-transform:uppercase;">Dublin Coffee Jobs · ${esc(date)}</p>
-<h1 style="font-size:22px;margin:6px 0 4px;">${shown.length ? `${shown.length} job${shown.length === 1 ? '' : 's'} from ${employers} employer${employers === 1 ? '' : 's'}` : 'No new jobs this time'}${leads.length ? ` · ${leads.length} to invite` : ''}</h1>
+<h1 style="font-size:22px;margin:6px 0 4px;">${shown.length ? `${shown.length} job${shown.length === 1 ? '' : 's'} from ${employers} employer${employers === 1 ? '' : 's'}` : 'No new jobs this time'}${leads.length + (state.dmLeads || []).length ? ` · ${leads.length + (state.dmLeads || []).length} to invite` : ''}</h1>
 <p style="margin:0;color:#6b6157;font-size:14px;">Anything you post goes on the board straight away. Its Instagram and Facebook post goes out within a few hours, one an hour.</p>`);
   text.push(`Dublin Coffee Jobs · ${date}`, '');
   const n = state.numbers;
@@ -2062,6 +2077,17 @@ async function sendScanEmail(state, env) {
     text.push(`Invite all ${leads.length}: ${base}/scan/invite-all?w=${state.week}&t=${state.allToken}`, '');
   }
 
+  const dms = state.dmLeads || [];
+  if (dms.length) {
+    html.push(h2(`Message on Instagram (${dms.length})`, 'Hiring, but no general email on their website. Copy the message, open their Instagram, and send it as a DM.'));
+    text.push('MESSAGE ON INSTAGRAM', '');
+    for (const d of dms) {
+      const msg = dmText(d, env);
+      html.push(card(`<strong>${esc(d.employer)}</strong> · ${esc(d.role)}${d.location ? ', ' + esc(d.location) : ''}<div style="background:#f5f1e9;color:#16130e;border-radius:8px;padding:10px 12px;margin:8px 0 10px;font-size:14px;line-height:1.5;user-select:all;-webkit-user-select:all;">${esc(msg)}</div>${btn(`https://instagram.com/${encodeURIComponent(d.handle)}`, 'Open @' + esc(d.handle), true)}`));
+      text.push(`${d.employer} — ${d.role}${d.location ? ', ' + d.location : ''}`, `Instagram: https://instagram.com/${d.handle}`, msg, '');
+    }
+  }
+
   const extras = [];
   if (state.addedEmployers.length) extras.push(`Added to the scan: ${state.addedEmployers.join(', ')}.`);
   extras.push(...state.notes);
@@ -2075,8 +2101,9 @@ async function sendScanEmail(state, env) {
   html.push(`<p style="margin-top:24px;color:#6b6157;font-size:12px;">Links work for 14 days. Nothing goes up unless you post it.</p></div></div>`);
   text.push('Links work for 14 days.');
 
-  const subject = shown.length || leads.length
-    ? `${shown.length} jobs from ${employers} employer${employers === 1 ? '' : 's'}${leads.length ? `, ${leads.length} to invite` : ''} — ${date}`
+  const toReach = leads.length + dms.length;
+  const subject = shown.length || toReach
+    ? `${shown.length} jobs from ${employers} employer${employers === 1 ? '' : 's'}${toReach ? `, ${toReach} to invite` : ''} — ${date}`
     : `Jobs scan — nothing new (${date})`;
   await sendEmailHtml(env, env.ALERT_EMAIL_TO, subject, text.join('\n'), html.join('\n'));
 }
@@ -2270,12 +2297,41 @@ async function isOptedOut(email, env) {
     (!/@(gmail|yahoo|hotmail|outlook|icloud|live|eircom)\./.test(domain) && !!(await env.FDC_STORE.get(`invite:optout:${domain}`)));
 }
 
-async function findInviteLeads(env, listings, state) {
+// Each scan's invite search is split into these, one per step, so each
+// search stays small and looks somewhere different.
+function inviteFocuses() {
+  return [
+    { label: 'Dublin cafés', ask: 'independent specialty coffee shops, cafés and small café groups in Dublin (city and county)' },
+    { label: 'bakeries and roasters', ask: 'bakeries, bakery-cafés, coffee roasters and artisan food producers anywhere in Ireland (including roastery, production, packing and dispatch roles)' },
+    { label: 'restaurants and hotels', ask: 'independent restaurants, wine bars, bars, hotels and contract caterers in Dublin' },
+    { label: 'outside Dublin', ask: 'cafés, coffee shops, bakeries, restaurants and hotels in Cork, Galway, Limerick, Kilkenny, Wicklow, Kildare, Meath, Louth and the rest of Ireland outside Dublin' },
+    seasonalOn()
+      ? { label: 'Christmas roles', ask: 'temporary, seasonal and Christmas roles at cafés, coffee kiosks, Christmas markets, festive pop-ups, food halls and hotels in Ireland' }
+      : { label: 'senior roles', ask: 'head barista, café manager, supervisor, head chef and bakery manager roles at independent businesses in Ireland' },
+  ];
+}
+
+function cleanHandle(h) {
+  const m = String(h || '').trim().replace(/^https?:\/\/(www\.)?instagram\.com\//i, '').replace(/^@/, '').split(/[/?#\s]/)[0];
+  return /^[a-z0-9._]{2,30}$/i.test(m) ? m.toLowerCase() : '';
+}
+
+function finishInviteNote(state) {
+  const w = state.inviteWhy;
+  if (!w) return;
+  const list = (label, a) => a.length ? ` ${a.length} ${label} (${a.slice(0, 6).join(', ')}${a.length > 6 ? '…' : ''}).` : '';
+  state.notes.push(`Invite search: found ${w.found} employer${w.found === 1 ? '' : 's'} hiring across ${inviteFocuses().length} searches.` +
+    list('already invited recently', w.recent) + list('had no email or Instagram we could use', w.email) +
+    list('already on the board', w.board) + list('invited before', w.sent) + list('asked not to be contacted', w.optout) +
+    (w.found === 0 ? ' The searches came back empty.' : ''));
+}
+
+async function findInviteLeads(env, listings, state, step = 0) {
+  const focus = inviteFocuses()[step] || inviteFocuses()[0];
   const employers = await getScanEmployers(env);
   const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
   const onBoard = new Set(listings.filter(l => l.kind === 'job').map(l => norm(l.data && l.data.venue)));
   const scanned = employers.filter(e => e.url).map(e => e.name);
-  // (watch list is built below, once we know who was contacted recently)
   // Employers already offered as invites in the last 45 days: the search skips
   // them so it spends its time finding new ones (17/11/26: Tuesday found none
   // because it kept re-finding Saturday's).
@@ -2295,60 +2351,74 @@ async function findInviteLeads(env, listings, state) {
   // 20/11/26: the search found nobody new because "check these first" listed
   // employers already invited or already on the board, so it spent its searches
   // re-finding them and they were then dropped. Only watch the ones still worth asking.
-  const watch = employers.filter(e => !e.url && !recentSet.has(norm(e.name)) && !onBoard.has(norm(e.name))).map(e => e.name);
+  const watch = step === 0 ? employers.filter(e => !e.url && !recentSet.has(norm(e.name)) && !onBoard.has(norm(e.name))).map(e => e.name) : [];
   const prompt = `You are helping Dublin Coffee Jobs, a free Irish coffee and hospitality jobs board, invite employers to list their vacancies.
-Find as many as you can, up to ${MAX_LEADS}, employers in Ireland that are hiring RIGHT NOW (ads from the last 3 weeks) for coffee, café, bakery, restaurant, bar or hotel front-line roles — barista, café staff, supervisor or manager, coffee roaster, roastery or production assistant, chef, waiting staff, bartender and similar.${seasonalOn() ? ' Temporary, seasonal and Christmas roles count too (Christmas markets, festive pop-ups, seasonal café staff).' : ''} Favour independent cafés, coffee roasters, bakeries and small groups.
-You may use job sites such as Indeed, IrishJobs, Jobs.ie or LinkedIn ONLY to see who is hiring and for what role. Do not copy anything else from them.
-Work efficiently: use job-site searches to collect several hiring employers at once, then find each one's GENERAL contact email published on the employer's OWN website (e.g. info@, hello@, jobs@, careers@). Never use a named person's email address, and never guess an address. Skip the employer if you can't find one.
-${watch.length ? `Also check these, and include any that are hiring now: ${watch.join('; ')}.\n` : ''}Most of your answer should be NEW employers not named anywhere in this message: aim for at least 8.
+This search is about: ${focus.ask}.
+Find as many as you can, up to 12, of these employers that are hiring RIGHT NOW (ads or "we're hiring" posts from the last 3 weeks) for front-line roles: barista, café staff, supervisor or manager, baker, coffee roaster, roastery or production assistant, chef, waiting staff, bartender and similar.${seasonalOn() ? ' Temporary, seasonal and Christmas roles count too.' : ''} Favour independent businesses over big chains.
+You may use job sites such as Indeed, IrishJobs, Jobs.ie or LinkedIn, and the employer's own Instagram or Facebook posts, ONLY to see who is hiring and for what role. Do not copy anything else from them.
+For each one, find their GENERAL contact email published on their OWN website (e.g. info@, hello@, jobs@, careers@). Never use a named person's email address, and never guess an address. If there's no general email, give their official Instagram handle instead (only if you're sure it's theirs). Skip them if you can't find either.
+${watch.length ? `Also check these, and include any that are hiring now: ${watch.join('; ')}.\n` : ''}Most of your answer should be employers not named anywhere in this message.
 Skip recruitment agencies and these employers: ${[...scanned, 'Pinecone Coffee', 'Boojum', 'Ground Coffee'].join('; ')}.
 Also skip these, which are already on our board or were contacted recently: ${[...boardNames, ...recent.map(r => r.name)].join('; ')}.
-Reply with ONLY a JSON array, no other text: [{"employer": "...", "role": "job title", "location": "town or county", "email": "...", "website": "https://their own site"}]`;
+Reply with ONLY a JSON array, no other text: [{"employer": "...", "role": "job title", "location": "town or county", "email": "... or empty", "instagram": "handle or empty", "website": "https://their own site"}]`;
   let found = [];
   try {
-    found = parseJsonArray(await callClaudeWithSearch(prompt, env, 15));
+    found = parseJsonArray(await callClaudeWithSearch(prompt, env, 12));
   } catch (e) {
-    state.notes.push(`Couldn't look for employers to invite this time. Reason: ${String(e.message || e).slice(0, 220)}`);
+    state.notes.push(`Invite search (${focus.label}) didn't work this time. Reason: ${String(e.message || e).slice(0, 200)}`);
   }
   const manual = [];
-  for (const m of MANUAL_INVITE_LEADS) {
+  if (step === 0) for (const m of MANUAL_INVITE_LEADS) {
     const offered = `invite:offered:${m.email}`;
     if (await env.FDC_STORE.get(offered)) continue;
     await env.FDC_STORE.put(offered, '1', { expirationTtl: 60 * 60 * 24 * 30 });
     manual.push(m);
   }
-  const why = { recent: [], email: [], board: [], sent: [], optout: [] };
+  const why = state.inviteWhy = state.inviteWhy || { found: 0, recent: [], email: [], board: [], sent: [], optout: [] };
+  why.found += found.filter(Boolean).length;
   for (const it of found) if (it && recentSet.has(norm(it.employer))) why.recent.push(it.employer);
   const items = [...manual, ...found.filter(it => it && !recentSet.has(norm(it.employer)) && !REMOVED_EMPLOYERS.test(String(it.employer || '')))];
 
   const ids = [], seen = new Set();
+  state.dmLeads = state.dmLeads || [];
   for (const it of items) {
     if (ids.length >= MAX_LEADS) break;
     const email = validInviteEmail(it && it.email);
     const employer = String((it && it.employer) || '').trim().slice(0, 80);
     const role = String((it && it.role) || '').trim().slice(0, 80);
-    if (!email && employer) { why.email.push(employer); continue; }
-    if (!email || !employer || !role || seen.has(email)) continue;
-    seen.add(email);
+    if (!employer || !role) continue;
     if (onBoard.has(norm(employer))) { why.board.push(employer); continue; }
-    if (await isOptedOut(email, env)) { why.optout.push(employer); continue; }
-    if (await env.FDC_STORE.get(`invite:sent:${email}`)) { why.sent.push(employer); continue; }
+    const location = String(it.location || '').trim().slice(0, 60);
     let website = cleanUrl(it.website);
     if (website && BLOCKED_JOB_SITES.test(new URL(website).hostname)) website = '';
+    if (!email) {
+      // No general email: offer Ger a ready-made Instagram message instead (20/11/26).
+      const handle = cleanHandle(it.instagram);
+      if (!handle || seen.has('@' + handle) || state.dmLeads.some(d => d.handle === handle)) { if (!handle) why.email.push(employer); continue; }
+      seen.add('@' + handle);
+      if (await env.FDC_STORE.get(`invite:dm:${handle}`)) { why.sent.push(employer); continue; }
+      await env.FDC_STORE.put(`invite:dm:${handle}`, '1', { expirationTtl: 60 * 60 * 24 * 60 });
+      state.dmLeads.push({ employer, role, location, handle, website });
+      recent.push({ name: employer, at: Date.now() });
+      continue;
+    }
+    if (seen.has(email)) continue;
+    seen.add(email);
+    if (await isOptedOut(email, env)) { why.optout.push(employer); continue; }
+    if (await env.FDC_STORE.get(`invite:sent:${email}`)) { why.sent.push(employer); continue; }
     const id = crypto.randomUUID();
-    const lead = { id, token: randomToken(), week: state.week, employer, role,
-      location: String(it.location || '').trim().slice(0, 60), email, website, ...(it.noAd ? { noAd: true } : {}) };
+    const lead = { id, token: randomToken(), week: state.week, employer, role, location, email, website, ...(it.noAd ? { noAd: true } : {}) };
     await env.FDC_STORE.put(`scan:lead:${id}`, JSON.stringify(lead), { expirationTtl: 60 * 60 * 24 * 14 });
     ids.push(id);
     recent.push({ name: employer, at: Date.now() });
   }
   await env.FDC_STORE.put('invite:recent-employers', JSON.stringify(recent.slice(-300)));
-  const list = (label, a) => a.length ? ` ${a.length} ${label} (${a.slice(0, 6).join(', ')}${a.length > 6 ? '…' : ''}).` : '';
-  state.notes.push(`Invite search: found ${found.length} employer${found.length === 1 ? '' : 's'} hiring.` +
-    list('already invited recently', why.recent) + list('had no general email address', why.email) +
-    list('already on the board', why.board) + list('invited before', why.sent) + list('asked not to be contacted', why.optout) +
-    (found.length === 0 ? ' The search came back empty.' : ''));
   return ids;
+}
+
+// The Instagram message Ger can paste when an employer has no general email.
+function dmText(d, env) {
+  return `Hi ${d.employer} team! We spotted you're hiring${d.role ? ' a ' + d.role : ''}. We run Dublin Coffee Jobs (23k followers): listing is free until the new year, takes two minutes, and gets shared on our Instagram and Facebook. Post it here: ${env.SITE_URL || 'https://dublincoffeejobs.com'}/job-board.html`;
 }
 
 function inviteEmailText(lead, inv, env) {
