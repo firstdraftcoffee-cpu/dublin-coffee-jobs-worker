@@ -877,19 +877,21 @@ Brew method: ${method}. Problem: ${issue}`;
   },
 
   async scheduled(event, env, ctx) {
-    if (event && event.cron && event.cron !== '0 * * * *' && !isScanDay(dublinNow(new Date()))) return;
+    if (event && event.cron && event.cron !== '0 * * * *') {
+      // The 10-minute trigger only helps a scan that's under way; otherwise it
+      // stops here, before reading anything (the free plan limits daily lists and saves).
+      const t = dublinNow(new Date());
+      if (!isScanDay(t) || t.hour < SCAN_START_HOUR) return;
+      const st = JSON.parse((await env.FDC_STORE.get('scan:state')) || 'null');
+      if (st && st.week === t.date + (RERUN_DATES[t.date] || '') && st.phase === 'emailed') return;
+      if (st && st.phase === 'ready' && t.hour < SCAN_EMAIL_HOUR) return;
+    }
     const alertList = await env.FDC_STORE.list({ prefix: 'alert:' });
     const listingList = await env.FDC_STORE.list({ prefix: 'listing:' });
     const listings = [];
     for (const key of listingList.keys) {
       const raw = await env.FDC_STORE.get(key.name);
       if (raw) listings.push(JSON.parse(raw));
-    }
-
-    // One-off (20/11/26): can our Instagram connection read other business
-    // accounts' recent posts? Emails Ger the answer once, then never runs again.
-    if (!(event && event.cron && event.cron !== '0 * * * *')) {
-      try { await runInstagramAccessTest(env); } catch (e) { console.error('IG test:', String(e)); }
     }
 
     // Extra 10-minute trigger: only moves the scan along faster (it has more
@@ -915,8 +917,12 @@ Brew method: ${method}. Problem: ${issue}`;
         const lines = matches.map(m => `- ${m.data.title || m.data.role || 'Listing'} — ${m.data.venue || ''} ${m.data.location || m.data.area || ''}`).join('\n');
         await sendEmailTo(env, alert.email, `New matches on Dublin Coffee Jobs`, `New listings matching your saved search:\n\n${lines}\n\nView them at ${env.SITE_URL}`);
       }
-      alert.lastChecked = Date.now();
-      await env.FDC_STORE.put(key.name, JSON.stringify(alert), { expirationTtl: 60 * 60 * 24 * 90 });
+      // Only save when something was sent (20/11/26): re-saving every alert
+      // every hour used up the free plan's 1,000 saves a day.
+      if (matches.length > 0) {
+        alert.lastChecked = Date.now();
+        await env.FDC_STORE.put(key.name, JSON.stringify(alert), { expirationTtl: 60 * 60 * 24 * 90 });
+      }
     }
 
     // These two are naturally daily-cadence jobs (a digest and an
@@ -1094,33 +1100,6 @@ function contactRevealText(d) {
 // Every job post also tells employers they can post for free (20/11/26).
 function hiringLine(env) {
   return `\n\nHiring? ${isFreeLaunch(env) ? 'Post your job free until the new year' : 'Post your job'}: ${env.SITE_URL}/job-board.html`;
-}
-
-async function runInstagramAccessTest(env) {
-  if (!env.IG_USER_ID || !env.FB_PAGE_ACCESS_TOKEN || !env.ALERT_EMAIL_TO) return;
-  if (await env.FDC_STORE.get('igtest:done')) return;
-  await env.FDC_STORE.put('igtest:done', '1', { expirationTtl: 60 * 60 * 24 * 30 });
-  const lines = [];
-  let worked = 0;
-  for (const handle of ['instagram', 'scealbakery', '3fecoffee']) {
-    const fields = `business_discovery.username(${handle}){username,followers_count,media.limit(5){caption,timestamp,permalink}}`;
-    try {
-      const res = await fetch(`https://graph.facebook.com/v19.0/${env.IG_USER_ID}?fields=${encodeURIComponent(fields)}&access_token=${env.FB_PAGE_ACCESS_TOKEN}`);
-      const j = await res.json().catch(() => ({}));
-      const bd = j.business_discovery;
-      if (bd && bd.media) {
-        worked++;
-        const latest = (bd.media.data || [])[0];
-        lines.push(`@${handle}: worked. Read ${(bd.media.data || []).length} recent posts${latest ? `, latest from ${String(latest.timestamp || '').slice(0, 10)}: "${String(latest.caption || '').slice(0, 80)}"` : ''}.`);
-      } else {
-        const err = j.error || {};
-        lines.push(`@${handle}: didn't work. Meta said: ${err.message || 'no reason given'} (code ${err.code || '?'}${err.error_subcode ? '/' + err.error_subcode : ''}).`);
-      }
-    } catch (e) { lines.push(`@${handle}: couldn't reach Meta (${String(e).slice(0, 100)}).`); }
-  }
-  const verdict = worked ? 'Good news: Meta lets us read other cafés\' recent Instagram posts. Tell Claude it worked and the daily Instagram check can be built.'
-    : 'Meta didn\'t let us read other accounts\' posts this way. Send this email to Claude: the reasons below say what would be needed.';
-  await sendEmailTo(env, env.ALERT_EMAIL_TO, worked ? 'Instagram test: it works' : 'Instagram test: not allowed yet', `${verdict}\n\n${lines.join('\n')}`);
 }
 
 function listingCaption(record, env) {
