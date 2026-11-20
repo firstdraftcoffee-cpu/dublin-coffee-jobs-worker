@@ -1568,6 +1568,45 @@ const DEFAULT_SCAN_EMPLOYERS = [
   { name: 'Behind the Label Coffee Roasters', type: 'Coffee roaster, Dublin', url: '', formOnly: true },   // hiring 14/11/26 (Ger); no careers page or public email
   { name: 'UCC Coffee Ireland', type: 'Coffee roaster & supplier', url: '', formOnly: true },   // hiring 14/11/26 (Ger); jobs on job sites only
   { name: 'Silverskin Coffee Roasters', type: 'Coffee roaster, Dublin 10', url: '', formOnly: true },   // no own careers page found (13/11/26); watched for invites
+
+  // 20/11/26 coffee push: jobs pages confirmed by hand
+  { name: '3FE Coffee', type: 'Specialty coffee roaster & cafés', url: 'https://3fe.com/pages/careers' },
+  { name: 'Bread 41', type: 'Bakery café, Dublin', url: 'https://bread41.ie/jobs/' },
+  { name: 'Caffè Nero Ireland', type: 'Coffee chain', url: 'https://www.caffenero.com/ie/careers' },
+  // ...and coffee businesses whose jobs page discovery looks up (about 10 a day)
+  { name: 'Bewley\'s', type: 'Coffee business', url: '' },
+  { name: 'Two Fifty Square', type: 'Coffee business', url: '' },
+  { name: 'Roasted Brown Coffee', type: 'Coffee business', url: '' },
+  { name: 'Clement & Pekoe', type: 'Coffee business', url: '' },
+  { name: 'Shoe Lane Coffee', type: 'Coffee business', url: '' },
+  { name: 'Proper Order Coffee Co.', type: 'Coffee business', url: '' },
+  { name: 'Bear Market Coffee', type: 'Coffee business', url: '' },
+  { name: 'Golden Bean Coffee Roasters', type: 'Coffee business', url: '' },
+  { name: 'Badger & Dodo', type: 'Coffee business', url: '' },
+  { name: 'Imbibe Coffee Roasters', type: 'Coffee business', url: '' },
+  { name: 'Ariosa Coffee', type: 'Coffee business', url: '' },
+  { name: 'Wall & Keogh', type: 'Coffee business', url: '' },
+  { name: 'Brother Hubbard', type: 'Coffee business', url: '' },
+  { name: 'Third Space', type: 'Coffee business', url: '' },
+  { name: 'Bretzel Bakery', type: 'Coffee business', url: '' },
+  { name: 'Legit Coffee Co.', type: 'Coffee business', url: '' },
+  { name: 'Vice Coffee', type: 'Coffee business', url: '' },
+  { name: 'Starbucks Ireland', type: 'Coffee business', url: '' },
+  { name: 'Marco Beverage Systems', type: 'Coffee business', url: '' },
+  { name: 'Lavazza Ireland', type: 'Coffee business', url: '' },
+  { name: 'Kaph', type: 'Coffee business', url: '' },
+  { name: 'Coffeewerk + Press (Galway)', type: 'Coffee business', url: '' },
+  { name: 'Dukes Coffee (Cork)', type: 'Coffee business', url: '' },
+  { name: 'Soma Coffee (Cork)', type: 'Coffee business', url: '' },
+  { name: 'Urban Grind (Galway)', type: 'Coffee business', url: '' },
+  { name: 'Cloud Picker Coffee', type: 'Coffee business', url: '' },
+  { name: 'Two Pups Coffee', type: 'Coffee business', url: '' },
+  { name: 'Kalido', type: 'Coffee business', url: '' },
+  { name: 'Network Café', type: 'Coffee business', url: '' },
+  { name: 'Filter (Cork)', type: 'Coffee business', url: '' },
+  { name: 'Cork Coffee Roasters', type: 'Coffee business', url: '' },
+  { name: 'Ponaire Coffee (Limerick)', type: 'Coffee business', url: '' },
+  { name: 'McCabe\'s Coffee', type: 'Coffee business', url: '' },
 ];
 const SCAN_START_HOUR = 1;
 // One-off extra scan days on top of every Monday (YYYY-MM-DD, Dublin time).
