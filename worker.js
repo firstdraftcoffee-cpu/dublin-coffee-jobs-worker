@@ -1813,9 +1813,17 @@ ${links.map(l => `- ${l.text} → ${l.href}`).join('\n').slice(0, 25000)}
 PAGE:
 ${text}`;
 
+  // Pages that haven't changed since they were last read have no new jobs, so
+  // skip the AI read (23/11/26: daily scans were using up the AI credit).
+  // Every page is still read in full at least once a week.
+  const pageKey = 'scan:page:' + await hashText(pageUrl);
+  const pageHash = await hashText(text + '\n' + links.map(l => l.href).join('\n'));
+  if ((await env.FDC_STORE.get(pageKey)) === pageHash) { emp._unchanged = true; return []; }
+
   const data = await callClaude(prompt, env, 6000);
   const reply = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
   const roles = parseJsonArray(reply);
+  await env.FDC_STORE.put(pageKey, pageHash, { expirationTtl: 60 * 60 * 24 * 7 });
   if (!roles.length) return [];
 
   const allowed = new Set([pageUrl, ...links.map(l => l.href)]);
