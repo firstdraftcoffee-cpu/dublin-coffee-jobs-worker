@@ -965,7 +965,54 @@ Brew method: ${method}. Problem: ${issue}`;
 
 // ── HELPERS ──────────────────────────────────────────────────────
 
+// ── AI: Google Gemini when its key is set (23/11/26: the Anthropic account
+// can't be used any more), otherwise the old Anthropic route. Answers come
+// back in the same shape either way, so nothing else had to change.
+const GEMINI_FALLBACK_MODEL = 'gemini-2.5-flash';
+async function callGemini(prompt, env, { maxTokens = 4000, search = false } = {}) {
+  const models = [env.GEMINI_MODEL || 'gemini-flash-latest', GEMINI_FALLBACK_MODEL];
+  let lastErr = '';
+  for (const model of [...new Set(models)]) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          // Room for the model's own thinking on top of the answer itself.
+          generationConfig: { maxOutputTokens: Math.max(8192, maxTokens * 2),
+            // Prompts that ask for JSON get Gemini's JSON-only mode (can't be combined with search).
+            ...(!search && /ONLY (with )?(a )?JSON/i.test(prompt) ? { responseMimeType: 'application/json' } : {}) },
+          ...(search ? { tools: [{ google_search: {} }] } : {}),
+        }),
+      });
+      const raw = await res.text();
+      let data = null; try { data = JSON.parse(raw); } catch {}
+      if (res.ok && data && data.candidates) {
+        const parts = ((data.candidates[0] || {}).content || {}).parts || [];
+        return parts.filter(p => p.text && !p.thought).map(p => p.text).join('');
+      }
+      const msg = (data && data.error && data.error.message) || raw.slice(0, 160);
+      lastErr = `${res.status}: ${msg}`;
+      if (res.status === 404) break;                       // model name not available: try the next one
+      if ((res.status === 429 || res.status >= 500) && attempt === 0 && !/quota|billing|free tier/i.test(msg)) {
+        await new Promise(r => setTimeout(r, 20000));
+        continue;
+      }
+      if (search && /google_search|grounding|billing|free tier|not supported|not available/i.test(msg)) {
+        throw new Error(`the invite search needs billing switched on for the Gemini key in Google AI Studio (Google said: ${msg.slice(0, 120)})`);
+      }
+      throw new Error(`AI failed (${lastErr})`.slice(0, 240));
+    }
+  }
+  throw new Error(`AI failed (${lastErr})`.slice(0, 240));
+}
+
 async function callClaude(prompt, env, maxTokens) {
+  if (env.GEMINI_API_KEY) {
+    const text = await callGemini(prompt, env, { maxTokens: maxTokens || 4000 });
+    return { content: [{ type: 'text', text }] };
+  }
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -1994,6 +2041,7 @@ When finished, reply with ONLY a JSON array, no other text: [{"name": "...", "ty
 // inside the account's per-minute limits; if a limit or a busy server is hit,
 // waits a minute and tries once more. Errors carry a short, readable reason.
 async function callClaudeWithSearch(prompt, env, maxUses = 6) {
+  if (env.GEMINI_API_KEY) return callGemini(prompt, env, { maxTokens: 8000, search: true });
   let messages = [{ role: 'user', content: prompt }];
   let text = '';
   let retried = false;
