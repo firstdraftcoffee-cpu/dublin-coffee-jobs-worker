@@ -2451,6 +2451,8 @@ const MANUAL_INVITE_LEADS = [
     email: 'darren@behindthelabel.ie', website: 'https://www.behindthelabelcoffee.ie' },   // job seen by Ger 14/11/26; email from Ger
   { employer: "Elliot's", role: 'Café Manager', location: 'Dublin 7',
     email: 'careers@elliots.ie', website: 'https://www.elliots.ie' },   // bakery café; email from Ger 18/11/26; Café Manager seen on their Instagram (bakers come through the scan)
+  { employer: 'Bear Market Coffee', role: 'Barista', location: 'Dublin',
+    email: 'careers@bearmarket.ie', website: 'https://bearmarket.ie', noAd: true },   // email from Ger 24/11/26; no job seen, so general wording
 ];
 
 function validInviteEmail(e) {
