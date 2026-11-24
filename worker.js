@@ -1680,7 +1680,7 @@ const EXTRA_SCAN_DATES = ['2026-11-03', '2026-11-04', '2026-11-14', '2026-11-18'
 // Regular scan days (Dublin time): scans overnight, email lands around 8am Tue & Fri.
 const SCAN_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'];   // every weekday from 23/11/26 (was Tue + Fri)
 const SCAN_EMAIL_HOUR = 8;
-const RERUN_DATES = {};
+const RERUN_DATES = { '2026-11-24': '-2' };   // fresh scan on Gemini, Ger asked 24/11/26
 const isScanDay = t => SCAN_DAYS.includes(t.weekday) || EXTRA_SCAN_DATES.includes(t.date) || !!RERUN_DATES[t.date];   // date -> suffix: starts a fresh run that day
 const BLOCKED_JOB_SITES = /(^|\.)(indeed\.|linkedin\.|jobs\.ie|irishjobs\.ie|jobsireland\.ie|glassdoor\.|ziprecruiter\.|simplyhired\.|jobijoba\.|cv-library\.|recruitireland\.|monster\.)/i;
 
