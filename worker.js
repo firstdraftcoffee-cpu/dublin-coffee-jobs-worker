@@ -190,6 +190,22 @@ Respond ONLY with a JSON object (no markdown, no backticks, no overall score —
 
         return jsonResponse({ status: 'done', result: record.result }, 200, ALLOWED_ORIGIN);
       }
+      // Roasting Hub's AI roast assistant (24/11/26): moved here so it runs on the
+      // same Gemini key as the rest of the site. Only answers the Roasting Hub itself.
+      if (path === '/roast-assistant' && request.method === 'POST') {
+        const origin = request.headers.get('Origin') || '';
+        if (!/^https:\/\/([a-z0-9-]+\.)*(theroastinghub\.com|fdc-roasting-hub\.pages\.dev)$|^http:\/\/localhost(:\d+)?$/i.test(origin)) {
+          return jsonResponse({ error: 'Not allowed' }, 403, ALLOWED_ORIGIN);
+        }
+        let body; try { body = await request.json(); } catch { return jsonResponse({ error: 'Bad request' }, 400, ALLOWED_ORIGIN); }
+        try {
+          const text = await roastAssistantReply(body, env);
+          return jsonResponse({ text }, 200, ALLOWED_ORIGIN);
+        } catch (e) {
+          console.error('Roast assistant failed:', String(e));
+          return jsonResponse({ error: "The assistant couldn't answer just now. Try again in a minute." }, 200, ALLOWED_ORIGIN);
+        }
+      }
       if (path === '/brew' && request.method === 'POST') {
         const { method, issue } = await request.json();
         if (!issue || issue.trim().length < 10) return jsonResponse({ error: 'Please describe the issue' }, 400, ALLOWED_ORIGIN);
@@ -1006,6 +1022,30 @@ async function callGemini(prompt, env, { maxTokens = 4000, search = false } = {}
     }
   }
   throw new Error(`AI failed (${lastErr})`.slice(0, 240));
+}
+
+const ROAST_ASSISTANT_ROLE = `You are a calm, experienced specialty coffee roasting coach working alongside a professional roaster on a Loring S70 Peregrine (a convection roaster: no drum-contact heat, burner and airflow changes act quickly, rate of rise responds within seconds). Temperatures are in °C and times in minutes:seconds from charge. Be practical and specific, in plain language. Never invent readings that aren't in the data you're given; if something important is missing, say so.`;
+
+async function roastAssistantReply(body, env) {
+  const ctx = JSON.stringify(body.context || {}).slice(0, 12000);
+  let prompt;
+  if (body.mode === 'review') {
+    prompt = `${ROAST_ASSISTANT_ROLE}
+Review this finished roast. Cover, briefly: how the development and timings look, anything in the curve worth noticing (stalls, crashes, flicks, a long or short Maillard phase), how it lines up with the colour, weight loss and score if given, and one or two concrete changes to try next time. Under 220 words, short paragraphs, no headings.
+ROAST DATA: ${ctx}`;
+  } else {
+    const msgs = (Array.isArray(body.messages) ? body.messages : []).slice(-12)
+      .map(m => `${m.role === 'assistant' ? 'Coach' : 'Roaster'}: ${String(m.content || '').slice(0, 1500)}`).join('\n');
+    if (!msgs) throw new Error('No question');
+    prompt = `${ROAST_ASSISTANT_ROLE}
+The roaster is mid-roast and asking you a question. Answer in 2-4 short sentences they can read at a glance: say what to do first, then why. Use the live readings below.
+LIVE ROAST: ${ctx}
+CONVERSATION:
+${msgs}
+Coach:`;
+  }
+  const data = await callClaude(prompt, env, 1200);
+  return data.content.map(c => c.text || '').join('').trim();
 }
 
 async function callClaude(prompt, env, maxTokens) {
