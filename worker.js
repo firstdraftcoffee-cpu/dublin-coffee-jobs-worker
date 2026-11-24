@@ -990,19 +990,29 @@ async function callGemini(prompt, env, { maxTokens = 4000, search = false } = {}
   let lastErr = '';
   for (const model of [...new Set(models)]) {
     for (let attempt = 0; attempt < 2; attempt++) {
-      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY },
-        body: JSON.stringify({
-          contents: [{ role: 'user', parts: [{ text: prompt }] }],
-          // Room for the model's own thinking on top of the answer itself.
-          generationConfig: { maxOutputTokens: Math.max(8192, maxTokens * 2),
-            // Prompts that ask for JSON get Gemini's JSON-only mode (can't be combined with search).
-            ...(!search && /ONLY (with )?(a )?JSON/i.test(prompt) ? { responseMimeType: 'application/json' } : {}) },
-          ...(search ? { tools: [{ google_search: {} }] } : {}),
-        }),
-      });
-      const raw = await res.text();
+      let res, raw;
+      try {
+        res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY },
+          // 24/11/26: a search that hangs now gives up after 75s (before the 524 timeout
+          // page appears) so it can retry, then try the other model.
+          signal: AbortSignal.timeout(search ? 75000 : 90000),
+          body: JSON.stringify({
+            contents: [{ role: 'user', parts: [{ text: prompt }] }],
+            // Room for the model's own thinking on top of the answer itself.
+            generationConfig: { maxOutputTokens: Math.max(8192, maxTokens * 2),
+              // Prompts that ask for JSON get Gemini's JSON-only mode (can't be combined with search).
+              ...(!search && /ONLY (with )?(a )?JSON/i.test(prompt) ? { responseMimeType: 'application/json' } : {}) },
+            ...(search ? { tools: [{ google_search: {} }] } : {}),
+          }),
+        });
+        raw = await res.text();
+      } catch (e) {
+        lastErr = `no answer in time (${String((e && e.name) || e)})`;
+        if (attempt === 0) { await new Promise(r => setTimeout(r, 5000)); continue; }
+        break;                                             // still nothing: try the next model
+      }
       let data = null; try { data = JSON.parse(raw); } catch {}
       if (res.ok && data && data.candidates) {
         const parts = ((data.candidates[0] || {}).content || {}).parts || [];
@@ -1011,9 +1021,9 @@ async function callGemini(prompt, env, { maxTokens = 4000, search = false } = {}
       const msg = (data && data.error && data.error.message) || raw.slice(0, 160);
       lastErr = `${res.status}: ${msg}`;
       if (res.status === 404) break;                       // model name not available: try the next one
-      if ((res.status === 429 || res.status >= 500) && attempt === 0 && !/quota|billing|free tier/i.test(msg)) {
-        await new Promise(r => setTimeout(r, 20000));
-        continue;
+      if ((res.status === 429 || res.status >= 500) && !/quota|billing|free tier/i.test(msg)) {
+        if (attempt === 0) { await new Promise(r => setTimeout(r, 20000)); continue; }
+        break;                                             // still busy: try the next model before giving up
       }
       if (search && /google_search|grounding|billing|free tier|not supported|not available/i.test(msg)) {
         throw new Error(`the invite search needs billing switched on for the Gemini key in Google AI Studio (Google said: ${msg.slice(0, 120)})`);
@@ -1798,12 +1808,22 @@ async function runJobScan(env, listings, now = new Date()) {
     // Several smaller searches, one per step, each aimed at a different kind
     // of employer (20/11/26: one big search only ever found ~7).
     const step = state.leadStep || 0;
+    // 24/11/26: a search that fails gets one more go on the next 10-minute tick
+    // before the step is given up on (the Dublin cafés search timed out with a 524).
+    const lastGo = state.leadRetryStep === step;
+    state.leadSearchFailed = false;
     try {
-      const ids = await findInviteLeads(env, listings, state, step);
+      const ids = await findInviteLeads(env, listings, state, step, lastGo);
       state.leads = [...(state.leads || []), ...ids];
     } catch (e) {
       console.error('Invite lead search failed:', String(e));
       state.notes.push(`Invite search (${inviteFocuses()[step].label}) didn't work this time. Reason: ${String(e.message || e).slice(0, 200)}`);
+    }
+    if (state.leadSearchFailed && !lastGo) {
+      state.leadRetryStep = step;
+      state.leadSearchFailed = false;
+      await done();
+      return;
     }
     state.leadStep = step + 1;
     if (state.leadStep < inviteFocuses().length) { await done(); return; }
@@ -2402,7 +2422,9 @@ async function handleScanRoute(path, request, url, env, ctx) {
 // or @domain> (forever).
 // ═══════════════════════════════════════════════════════════════════
 
-const GENERIC_INBOX = /^(info|hello|hi|jobs|job|careers|career|recruitment|recruit|recruiting|hr|people|work|team|contact|enquiries|enquiry|hiring|admin|office|cafe|coffee|shop|bookings|reservations|manager|management|general|mail)([.\-_]?[a-z0-9]*)?$/i;
+const GENERIC_INBOX = /^(info|hello|hi|jobs|job|careers|career|recruitment|recruit|recruiting|hr|people|work|team|contact|enquiries|enquiry|hiring|admin|office|cafe|coffee|shop|manager|management|general|mail)([.\-_]?[a-z0-9]*)?$/i;
+// 24/11/26: booking and sales inboxes (reservations@ at a hotel) aren't read by whoever hires, so they're never used.
+const BOOKING_INBOX = /^(booking|bookings|reservation|reservations|book|reserve|events|sales|orders?|accounts?|invoices?|reception|frontdesk|noreply|no-reply)([.\-_]?[a-z0-9]*)?$/i;
 const MAX_LEADS = 20;
 // Employers Ger has spotted hiring (one-off posts, no jobs page). Offered once
 // in the next email as an invite; checked against opt-outs and repeats as usual.
@@ -2435,7 +2457,8 @@ function validInviteEmail(e) {
   const email = String(e || '').trim().toLowerCase();
   if (!/^[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}$/.test(email) || email.length > 120) return '';
   // Only shared business inboxes — never a named person's address.
-  return GENERIC_INBOX.test(email.split('@')[0]) ? email : '';
+  const local = email.split('@')[0];
+  return GENERIC_INBOX.test(local) && !BOOKING_INBOX.test(local) ? email : '';
 }
 
 async function isOptedOut(email, env) {
@@ -2473,7 +2496,7 @@ function finishInviteNote(state) {
     (w.found === 0 ? ' The searches came back empty.' : ''));
 }
 
-async function findInviteLeads(env, listings, state, step = 0) {
+async function findInviteLeads(env, listings, state, step = 0, lastGo = true) {
   const focus = inviteFocuses()[step] || inviteFocuses()[0];
   const employers = await getScanEmployers(env);
   const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -2512,7 +2535,9 @@ Reply with ONLY a JSON array, no other text: [{"employer": "...", "role": "job t
   try {
     found = parseJsonArray(await callClaudeWithSearch(prompt, env, 12));
   } catch (e) {
-    state.notes.push(`Invite search (${focus.label}) didn't work this time. Reason: ${String(e.message || e).slice(0, 200)}`);
+    state.leadSearchFailed = true;
+    // Only say so in the email once the retry has failed too.
+    if (lastGo) state.notes.push(`Invite search (${focus.label}) didn't work this time. Reason: ${String(e.message || e).slice(0, 200)}`);
   }
   const manual = [];
   if (step === 0) for (const m of MANUAL_INVITE_LEADS) {
