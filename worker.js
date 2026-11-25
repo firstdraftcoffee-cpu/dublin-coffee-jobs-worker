@@ -984,10 +984,12 @@ Brew method: ${method}. Problem: ${issue}`;
 // ── AI: Google Gemini when its key is set (23/11/26: the Anthropic account
 // can't be used any more), otherwise the old Anthropic route. Answers come
 // back in the same shape either way, so nothing else had to change.
-const GEMINI_FALLBACK_MODEL = 'gemini-2.5-flash';
+// 25/11/26: Google retired gemini-2.5-flash for new accounts (404) and named gemini-3.8-flash as its replacement.
+const GEMINI_FALLBACK_MODEL = 'gemini-3.8-flash';
 async function callGemini(prompt, env, { maxTokens = 4000, search = false } = {}) {
   const models = [env.GEMINI_MODEL || 'gemini-flash-latest', GEMINI_FALLBACK_MODEL];
   let lastErr = '';
+  const tried = [];                                        // what each model said, so the email shows every failure, not just the last
   for (const model of [...new Set(models)]) {
     for (let attempt = 0; attempt < 2; attempt++) {
       let res, raw;
@@ -1009,7 +1011,7 @@ async function callGemini(prompt, env, { maxTokens = 4000, search = false } = {}
         });
         raw = await res.text();
       } catch (e) {
-        lastErr = `no answer in time (${String((e && e.name) || e)})`;
+        lastErr = `${model}: no answer in time (${String((e && e.name) || e)})`;
         if (attempt === 0) { await new Promise(r => setTimeout(r, 5000)); continue; }
         break;                                             // still nothing: try the next model
       }
@@ -1019,7 +1021,7 @@ async function callGemini(prompt, env, { maxTokens = 4000, search = false } = {}
         return parts.filter(p => p.text && !p.thought).map(p => p.text).join('');
       }
       const msg = (data && data.error && data.error.message) || raw.slice(0, 160);
-      lastErr = `${res.status}: ${msg}`;
+      lastErr = `${model} ${res.status}: ${msg.slice(0, 90)}`;
       if (res.status === 404) break;                       // model name not available: try the next one
       if ((res.status === 429 || res.status >= 500) && !/quota|billing|free tier/i.test(msg)) {
         if (attempt === 0) { await new Promise(r => setTimeout(r, 20000)); continue; }
@@ -1028,10 +1030,11 @@ async function callGemini(prompt, env, { maxTokens = 4000, search = false } = {}
       if (search && /google_search|grounding|billing|free tier|not supported|not available/i.test(msg)) {
         throw new Error(`the invite search needs billing switched on for the Gemini key in Google AI Studio (Google said: ${msg.slice(0, 120)})`);
       }
-      throw new Error(`AI failed (${lastErr})`.slice(0, 240));
+      throw new Error(`AI failed (${[...tried, lastErr].join(' | ')})`.slice(0, 300));
     }
+    tried.push(lastErr); lastErr = '';
   }
-  throw new Error(`AI failed (${lastErr})`.slice(0, 240));
+  throw new Error(`AI failed (${tried.join(' | ')})`.slice(0, 300));
 }
 
 const ROAST_ASSISTANT_ROLE = `You are a calm, experienced specialty coffee roasting coach working alongside a professional roaster on a Loring S70 Peregrine (a convection roaster: no drum-contact heat, burner and airflow changes act quickly, rate of rise responds within seconds). Temperatures are in °C and times in minutes:seconds from charge. Be practical and specific, in plain language. Never invent readings that aren't in the data you're given; if something important is missing, say so.`;
@@ -1797,7 +1800,7 @@ async function runJobScan(env, listings, now = new Date()) {
       state.addedEmployers = await discoverEmployers(env);
     } catch (e) {
       console.error('Employer discovery failed:', String(e));
-      state.notes.push(`Couldn't search for new employers this time. Reason: ${String(e.message || e).slice(0, 220)}`);
+      state.notes.push(`Couldn't search for new employers this time. Reason: ${String(e.message || e).slice(0, 300)}`);
     }
     state.phase = isFreeLaunch(env) ? 'leads' : 'ready';
     await done();
@@ -1817,7 +1820,7 @@ async function runJobScan(env, listings, now = new Date()) {
       state.leads = [...(state.leads || []), ...ids];
     } catch (e) {
       console.error('Invite lead search failed:', String(e));
-      state.notes.push(`Invite search (${inviteFocuses()[step].label}) didn't work this time. Reason: ${String(e.message || e).slice(0, 200)}`);
+      state.notes.push(`Invite search (${inviteFocuses()[step].label}) didn't work this time. Reason: ${String(e.message || e).slice(0, 300)}`);
     }
     if (state.leadSearchFailed && !lastGo) {
       state.leadRetryStep = step;
@@ -2451,8 +2454,6 @@ const MANUAL_INVITE_LEADS = [
     email: 'darren@behindthelabel.ie', website: 'https://www.behindthelabelcoffee.ie' },   // job seen by Ger 14/11/26; email from Ger
   { employer: "Elliot's", role: 'Café Manager', location: 'Dublin 7',
     email: 'careers@elliots.ie', website: 'https://www.elliots.ie' },   // bakery café; email from Ger 18/11/26; Café Manager seen on their Instagram (bakers come through the scan)
-  { employer: 'Bear Market Coffee', role: 'Barista', location: 'Dublin',
-    email: 'careers@bearmarket.ie', website: 'https://bearmarket.ie', noAd: true },   // email from Ger 24/11/26; no job seen, so general wording
 ];
 
 function validInviteEmail(e) {
@@ -2539,7 +2540,7 @@ Reply with ONLY a JSON array, no other text: [{"employer": "...", "role": "job t
   } catch (e) {
     state.leadSearchFailed = true;
     // Only say so in the email once the retry has failed too.
-    if (lastGo) state.notes.push(`Invite search (${focus.label}) didn't work this time. Reason: ${String(e.message || e).slice(0, 200)}`);
+    if (lastGo) state.notes.push(`Invite search (${focus.label}) didn't work this time. Reason: ${String(e.message || e).slice(0, 300)}`);
   }
   const manual = [];
   if (step === 0) for (const m of MANUAL_INVITE_LEADS) {
