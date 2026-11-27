@@ -74,12 +74,97 @@ HIRING SEASONALITY (useful for advice on timing an application):
 Jan-Feb quiet (post-Christmas, replacing staff only). March hiring begins, April-May busy. June-August peak (tourism, events, students). September another spike as students leave and businesses stabilise. October steady. November is Christmas recruitment season. December is almost entirely emergency cover, very little permanent hiring. Coffee-specific hiring often follows café openings, new wholesale contracts, roasting expansion, and summer tourism.
 `;
 
+
+const DCJ_AUTH_ORIGIN = 'https://dublincoffeejobs.com';
+const DCJ_AUTH_TTL = 20 * 60 * 1000;
+const DCJ_SESSION_TTL = 8 * 60 * 60 * 1000;
+function dcjAuthRandom() {
+  return Array.from(crypto.getRandomValues(new Uint8Array(32)), b => b.toString(16).padStart(2,'0')).join('');
+}
+function dcjAuthValidToken(t) { return typeof t === 'string' && /^[a-f0-9]{64}$/.test(t); }
+function dcjAuthEmail(e) {
+  return typeof e === 'string' && e.trim().length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e.trim()) ? e.trim().toLowerCase() : null;
+}
+function dcjAuthReply(data, status=200) {
+  return new Response(JSON.stringify(data), {status,headers:{
+    'Content-Type':'application/json','Cache-Control':'no-store',
+    'Access-Control-Allow-Origin':DCJ_AUTH_ORIGIN,'Vary':'Origin',
+    'X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer'
+  }});
+}
+async function dcjAuthHash(env, scope, value) {
+  const enc=new TextEncoder();
+  const key=await crypto.subtle.importKey('raw',enc.encode(env.DCJ_AUTH_SECRET),{name:'HMAC',hash:'SHA-256'},false,['sign']);
+  return Array.from(new Uint8Array(await crypto.subtle.sign('HMAC',key,enc.encode(scope+':'+value))), b=>b.toString(16).padStart(2,'0')).join('');
+}
+async function dcjAuthLimit(env, scope, max, now) {
+  const hash=await dcjAuthHash(env,'limit',scope);
+  const row=await env.AUTH_DB.prepare("INSERT INTO dcj_auth_limits(scope,attempts,expires_at) VALUES (?,1,?) ON CONFLICT(scope) DO UPDATE SET attempts=CASE WHEN expires_at<=? THEN 1 ELSE attempts+1 END, expires_at=CASE WHEN expires_at<=? THEN excluded.expires_at ELSE expires_at END RETURNING attempts").bind(hash,now+900000,now,now).first();
+  return !!row && row.attempts<=max;
+}
+async function dcjAuthSession(request,env) {
+  const token=(request.headers.get('Authorization')||'').replace(/^Bearer /i,'');
+  if(!dcjAuthValidToken(token))return null;
+  const hash=await dcjAuthHash(env,'session',token);
+  return env.AUTH_DB.prepare("SELECT email FROM dcj_auth_sessions WHERE session_hash=? AND expires_at>?").bind(hash,Date.now()).first();
+}
+async function dcjAuthRoute(path,request,env) {
+  if(request.headers.get('Origin')!==DCJ_AUTH_ORIGIN)return dcjAuthReply({error:'Origin not allowed'},403);
+  if(!env.AUTH_DB||!env.RESEND_API_KEY||!env.DCJ_AUTH_SECRET||env.DCJ_AUTH_SECRET.length<64)return dcjAuthReply({error:'Sign-in unavailable'},503);
+  try {
+    const now=Date.now(), ip=request.headers.get('CF-Connecting-IP')||'unknown';
+    if(path==='/auth/request'&&request.method==='POST') {
+      const body=await request.json(),email=dcjAuthEmail(body.email);
+      if(!email)return dcjAuthReply({error:'Invalid email'},400);
+      if(!(await dcjAuthLimit(env,'request-ip:'+ip,12,now))||!(await dcjAuthLimit(env,'request-email:'+email,2,now)))return dcjAuthReply({ok:true});
+      await env.AUTH_DB.prepare("DELETE FROM dcj_auth_tokens WHERE token_hash IN (SELECT token_hash FROM dcj_auth_tokens WHERE expires_at<=? LIMIT 100)").bind(now).run();
+      await env.AUTH_DB.prepare("DELETE FROM dcj_auth_sessions WHERE session_hash IN (SELECT session_hash FROM dcj_auth_sessions WHERE expires_at<=? LIMIT 100)").bind(now).run();
+      await env.AUTH_DB.prepare("DELETE FROM dcj_auth_limits WHERE scope IN (SELECT scope FROM dcj_auth_limits WHERE expires_at<=? LIMIT 100)").bind(now).run();
+      const token=dcjAuthRandom(),hash=await dcjAuthHash(env,'login',token);
+      await env.AUTH_DB.prepare("INSERT INTO dcj_auth_tokens(token_hash,email,expires_at) VALUES (?,?,?)").bind(hash,email,now+DCJ_AUTH_TTL).run();
+      try {
+        const res=await fetch('https://api.resend.com/emails',{method:'POST',headers:{Authorization:'Bearer '+env.RESEND_API_KEY,'Content-Type':'application/json'},body:JSON.stringify({from:'Dublin Coffee Jobs <alerts@firstdraftcoffee.net>',to:[email],subject:'Your Dublin Coffee Jobs sign-in code',text:'Enter this one-time sign-in code in the employer sign-in page. It expires in 20 minutes. If you did not request it, ignore this message.\n\n'+token})});
+        if(!res.ok)throw Error('Email delivery failed');
+      }catch{
+        await env.AUTH_DB.prepare("DELETE FROM dcj_auth_tokens WHERE token_hash=?").bind(hash).run();
+        return dcjAuthReply({error:'Sign-in temporarily unavailable'},503);
+      }
+      return dcjAuthReply({ok:true});
+    }
+    if(path==='/auth/redeem'&&request.method==='POST') {
+      if(!(await dcjAuthLimit(env,'redeem-ip:'+ip,30,now)))return dcjAuthReply({error:'Too many attempts'},429);
+      const body=await request.json(),token=body.token;
+      if(!dcjAuthValidToken(token))return dcjAuthReply({error:'Invalid or expired code'},401);
+      const hash=await dcjAuthHash(env,'login',token);
+      const row=await env.AUTH_DB.prepare("UPDATE dcj_auth_tokens SET used_at=? WHERE token_hash=? AND expires_at>? AND used_at IS NULL RETURNING email").bind(now,hash,now).first();
+      if(!row)return dcjAuthReply({error:'Invalid or expired code'},401);
+      const session=dcjAuthRandom(),sessionHash=await dcjAuthHash(env,'session',session);
+      await env.AUTH_DB.prepare("INSERT INTO dcj_auth_sessions(session_hash,email,created_at,expires_at) VALUES (?,?,?,?)").bind(sessionHash,row.email,now,now+DCJ_SESSION_TTL).run();
+      return dcjAuthReply({session,email:row.email,expiresAt:now+DCJ_SESSION_TTL});
+    }
+    if(path==='/auth/me'&&request.method==='GET') {
+      const row=await dcjAuthSession(request,env);
+      return row?dcjAuthReply({email:row.email}):dcjAuthReply({error:'Sign-in required'},401);
+    }
+    if(path==='/auth/logout'&&request.method==='POST') {
+      const token=(request.headers.get('Authorization')||'').replace(/^Bearer /i,'');
+      if(dcjAuthValidToken(token))await env.AUTH_DB.prepare("DELETE FROM dcj_auth_sessions WHERE session_hash=?").bind(await dcjAuthHash(env,'session',token)).run();
+      return dcjAuthReply({ok:true});
+    }
+    return dcjAuthReply({error:'Not found'},404);
+  }catch {return dcjAuthReply({error:'Sign-in temporarily unavailable'},503);}
+}
+
 export default {
   async fetch(request, env, ctx) {
     const ALLOWED_ORIGIN = '*';
     const url = new URL(request.url);
     const path = url.pathname;
 
+    if (request.method === 'OPTIONS' && path.startsWith('/auth/')) {
+      if(request.headers.get('Origin')!==DCJ_AUTH_ORIGIN)return dcjAuthReply({error:'Origin not allowed'},403);
+      return new Response(null,{status:204,headers:{'Access-Control-Allow-Origin':DCJ_AUTH_ORIGIN,'Access-Control-Allow-Methods':'GET,POST,OPTIONS','Access-Control-Allow-Headers':'Content-Type,Authorization','Vary':'Origin'}});
+    }
     if (request.method === 'OPTIONS') {
       return new Response(null, {
         headers: {
@@ -91,6 +176,7 @@ export default {
     }
 
     try {
+      if (path.startsWith('/auth/')) return await dcjAuthRoute(path,request,env);
       // Temporary privacy containment pending verified employer access.
       const paused = new Set(['/apply', '/applicants', '/applicants/remove',
         '/upload/file', '/listings/edit', '/cv/full/start', '/cv/full/result']);
