@@ -1693,7 +1693,7 @@ const EXTRA_SCAN_DATES = ['2026-11-03', '2026-11-04', '2026-11-14', '2026-11-18'
 // Regular scan days (Dublin time): scans overnight, email lands around 8am Tue & Fri.
 const SCAN_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'];   // every weekday from 23/11/26 (was Tue + Fri)
 const SCAN_EMAIL_HOUR = 8;
-const RERUN_DATES = { '2026-11-24': '-2', '2026-11-25': '-2' };   // 24/11: fresh scan on Gemini; 25/11: rerun after the Gemini model fix, Ger asked
+const RERUN_DATES = { '2026-11-24': '-2', '2026-11-25': '-2', '2026-11-27': '-2' };   // 24/11: fresh scan on Gemini; 25/11: rerun after the Gemini model fix, Ger asked; 27/11: rerun after Ger topped up the Gemini credit
 const isScanDay = t => SCAN_DAYS.includes(t.weekday) || EXTRA_SCAN_DATES.includes(t.date) || !!RERUN_DATES[t.date];   // date -> suffix: starts a fresh run that day
 const BLOCKED_JOB_SITES = /(^|\.)(indeed\.|linkedin\.|jobs\.ie|irishjobs\.ie|jobsireland\.ie|glassdoor\.|ziprecruiter\.|simplyhired\.|jobijoba\.|cv-library\.|recruitireland\.|monster\.)/i;
 
