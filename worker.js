@@ -3173,8 +3173,9 @@ async function handleEmployerSignup(request, env, origin) {
 
 // Wednesdays: a GitHub job builds "This week's jobs" Story video into the site
 // at /stories/weekly-YYYY-MM-DD.mp4 around 05:30. From 08:00 this emails Ger the
-// link once. If there's still no video at noon (no new jobs, or the build
-// failed), it says so instead.
+// link once. It keeps checking every hour (GitHub can start the build 10 to 13
+// hours late). If there's still no video at 9pm (no new jobs, or the build
+// failed), it says so instead. 27/11/26.
 async function runWeeklyStoryEmail(env, now = new Date()) {
   if (!env.ALERT_EMAIL_TO) return;
   const t = dublinNow(now);
@@ -3198,7 +3199,7 @@ async function runWeeklyStoryEmail(env, now = new Date()) {
 <p style="color:#6b6157;font-size:13px">It shows up to 6 of the jobs added in the last 7 days, coffee jobs first.</p></div>`;
     await sendEmailHtml(env, env.ALERT_EMAIL_TO, "This week's jobs video is ready", text, html);
     await env.FDC_STORE.put(flag, '1', { expirationTtl: 60 * 60 * 24 * 8 });
-  } else if (t.hour >= 12) {
+  } else if (t.hour >= 21) {
     await sendEmailTo(env, env.ALERT_EMAIL_TO, "No jobs video this week", `There's no "This week's jobs" video today. Either no new jobs went up in the last 7 days, or the video didn't build. If there were new jobs, tell Claude and it'll check.\n\nThanks!\nDublin Coffee Jobs`);
     await env.FDC_STORE.put(flag, '1', { expirationTtl: 60 * 60 * 24 * 8 });
   }
