@@ -31,4 +31,4 @@ bucket_name = "fdc-uploads"
 [[d1_databases]]
 binding = "AUTH_DB"
 database_name = "dcj-auth-db"
-database_id = "330a08ba-bb02-47ee-8e27-ede2d20163d7"
+database_id = "91902f80-598d-4b78-9830-b748e19c8d94"
