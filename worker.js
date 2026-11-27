@@ -395,8 +395,9 @@ Brew method: ${method}. Problem: ${issue}`;
         if (!valid) return new Response('Invalid signature', { status: 400 });
 
         const event = JSON.parse(rawBody);
-        if (event.type === 'checkout.session.completed') {
+        if (['checkout.session.completed','checkout.session.async_payment_succeeded'].includes(event.type)) {
           const session = event.data.object;
+          if (session.payment_status !== 'paid') return new Response('Payment pending', {status:200});
           const listingId = session.metadata?.listingId;
           const reviewId = session.metadata?.reviewId;
           const revealListingId = session.metadata?.revealListingId;
@@ -528,6 +529,7 @@ Brew method: ${method}. Problem: ${issue}`;
         const raw = await env.FDC_STORE.get(`listing:${id}`);
         if (!raw) return jsonResponse({ error: 'Listing not found or expired' }, 404, ALLOWED_ORIGIN);
         const record = JSON.parse(raw);
+        if (record.flagged || record.status !== 'published' || (record.expiresAt && record.expiresAt <= Date.now())) return jsonResponse({ error:'Not found' },404,ALLOWED_ORIGIN);
         // Same rule as the public board: an "available" post's email and
         // WhatsApp are only ever released through the paid reveal. Without
         // this, anyone could read them here for free using the listing ID.
@@ -1209,20 +1211,22 @@ async function createStripeCheckoutSession({ priceId, listingId, email, successU
 }
 
 async function verifyStripeSignature(rawBody, sigHeader, secret) {
-  if (!sigHeader) return false;
-  const parts = Object.fromEntries(sigHeader.split(',').map(p => p.split('=')));
-  const timestamp = parts.t;
-  const signature = parts.v1;
-  if (!timestamp || !signature) return false;
-
-  const signedPayload = `${timestamp}.${rawBody}`;
-  const key = await crypto.subtle.importKey(
-    'raw', new TextEncoder().encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
-  );
-  const sigBuffer = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(signedPayload));
-  const expected = [...new Uint8Array(sigBuffer)].map(b => b.toString(16).padStart(2, '0')).join('');
-  return expected === signature;
+  if (typeof sigHeader !== 'string' || typeof secret !== 'string' || !secret || sigHeader.length > 4096) return false;
+  const pairs = sigHeader.split(',').map(p => p.trim().split('='));
+  const times = pairs.filter(p => p[0] === 't');
+  if (times.length !== 1 || times[0].length !== 2 || !/^\d+$/.test(times[0][1] || '')) return false;
+  const timestamp = Number(times[0][1]);
+  if (!Number.isSafeInteger(timestamp) || Math.abs(Math.floor(Date.now()/1000) - timestamp) > 300) return false;
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret),
+    {name:'HMAC',hash:'SHA-256'}, false, ['verify']);
+  const payload = new TextEncoder().encode(`${times[0][1]}.${rawBody}`);
+  for (const pair of pairs) {
+    const [kind, sig] = pair;
+    if (pair.length !== 2 || kind !== 'v1' || !/^[a-f0-9]{64}$/i.test(sig || '')) continue;
+    const bytes = Uint8Array.from(sig.match(/../g), x => parseInt(x,16));
+    if (await crypto.subtle.verify('HMAC',key,bytes,payload)) return true;
+  }
+  return false;
 }
 
 function contactRevealText(d) {
