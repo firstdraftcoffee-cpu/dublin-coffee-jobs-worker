@@ -27,3 +27,8 @@ bucket_name = "fdc-uploads"
 
 # ANTHROPIC_API_KEY is set as a secret, not here — run:
 #   npx wrangler secret put ANTHROPIC_API_KEY
+
+[[d1_databases]]
+binding = "AUTH_DB"
+database_name = "dcj-auth-db"
+database_id = "330a08ba-bb02-47ee-8e27-ede2d20163d7"
