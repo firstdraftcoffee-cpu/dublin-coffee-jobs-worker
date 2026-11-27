@@ -814,20 +814,45 @@ Brew method: ${method}. Problem: ${issue}`;
         return jsonResponse({ jobTitle: listing.data.title, skipScoring: !!listing.data.skipScoring, applicants }, 200, ALLOWED_ORIGIN);
       }
 
+      // Public artwork uses a new isolated namespace; legacy mixed uploads are never served.
+      function artworkType(bytes){if(bytes.length>=8&&[137,80,78,71,13,10,26,10].every((v,i)=>bytes[i]===v))return "image/png";if(bytes.length>=3&&bytes[0]===255&&bytes[1]===216&&bytes[2]===255)return "image/jpeg";if(bytes.length>=12&&String.fromCharCode(...bytes.slice(0,4))==="RIFF"&&String.fromCharCode(...bytes.slice(8,12))==="WEBP")return "image/webp";return null}
+      function artworkKey(path){const m=path.match(/^\/artwork\/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\.(png|jpg|webp))$/);return m?"public-artwork-v1/"+m[1]:null}
+      if (path.startsWith('/artwork/') && (request.method === 'GET' || request.method === 'HEAD')) {
+        const key = artworkKey(path);
+        if (!key) return new Response('Not found', {status:404});
+        const obj = await env.FDC_UPLOADS.get(key);
+        if (!obj) return new Response('Not found', {status:404});
+        const type = obj.httpMetadata?.contentType;
+        const expected = key.endsWith('.png') ? 'image/png' : key.endsWith('.jpg') ? 'image/jpeg' : 'image/webp';
+        if (type !== expected) return new Response('Not found', {status:404});
+        return new Response(request.method === 'HEAD' ? null : obj.body, {headers:{
+          'Content-Type':type, 'X-Content-Type-Options':'nosniff',
+          'Content-Security-Policy':"default-src 'none'; sandbox",
+          'Cache-Control':'public, max-age=3600',
+          'Access-Control-Allow-Origin':'*'
+        }});
+      }
       if (path === '/upload/image' && request.method === 'POST') {
-        const contentType = request.headers.get('content-type') || '';
-        if (!contentType.startsWith('image/')) {
-          return jsonResponse({ error: 'Only image files are allowed' }, 400, ALLOWED_ORIGIN);
+        const declared = (request.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+        const limit = 8 * 1024 * 1024;
+        if (!['image/png','image/jpeg','image/webp'].includes(declared)) return jsonResponse({error:'Use PNG, JPEG or WebP'},400,ALLOWED_ORIGIN);
+        if (Number(request.headers.get('content-length') || 0) > limit || !request.body) return jsonResponse({error:'Image must be under 8MB'},400,ALLOWED_ORIGIN);
+        const reader = request.body.getReader();
+        let total=0; const chunks=[];
+        while (true) {
+          const part=await reader.read();
+          if (part.done) break;
+          total+=part.value.byteLength;
+          if (total>limit) {await reader.cancel();return jsonResponse({error:'Image must be under 8MB'},400,ALLOWED_ORIGIN);}
+          chunks.push(part.value);
         }
-        const bytes = await request.arrayBuffer();
-        if (bytes.byteLength > 8 * 1024 * 1024) {
-          return jsonResponse({ error: 'Image must be under 8MB' }, 400, ALLOWED_ORIGIN);
-        }
-        const ext = contentType.split('/')[1]?.split('+')[0] || 'jpg';
-        const key = `uploads/${crypto.randomUUID()}.${ext}`;
-        await env.FDC_UPLOADS.put(key, bytes, { httpMetadata: { contentType } });
-        const url = `${env.R2_PUBLIC_URL}/${key}`;
-        return jsonResponse({ url }, 200, ALLOWED_ORIGIN);
+        const bytes=new Uint8Array(total);let offset=0;
+        for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.byteLength;}
+        if (artworkType(bytes)!==declared) return jsonResponse({error:'Image format does not match file contents'},400,ALLOWED_ORIGIN);
+        const ext=declared==='image/png'?'png':declared==='image/jpeg'?'jpg':'webp';
+        const filename=crypto.randomUUID()+'.'+ext;
+        await env.FDC_UPLOADS.put('public-artwork-v1/'+filename,bytes,{httpMetadata:{contentType:declared}});
+        return jsonResponse({url:'https://cv-review.firstdraftcoffee.workers.dev/artwork/'+filename},200,ALLOWED_ORIGIN);
       }
 
       if (path === '/listings/edit' && request.method === 'GET') {
