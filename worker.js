@@ -91,6 +91,15 @@ export default {
     }
 
     try {
+      // Temporary privacy containment pending verified employer access.
+      const paused = new Set(['/apply', '/applicants', '/applicants/remove',
+        '/upload/file', '/listings/edit', '/cv/full/start', '/cv/full/result']);
+      if (paused.has(path) || path.startsWith('/admin/')) {
+        return new Response(JSON.stringify({error:'Temporarily unavailable for security maintenance'}), {
+          status:503, headers:{'Content-Type':'application/json',
+            'Cache-Control':'no-store','Access-Control-Allow-Origin':ALLOWED_ORIGIN}
+        });
+      }
       if (path.startsWith('/scan/') || path.startsWith('/invite/')) {
         const scanResponse = await handleScanRoute(path, request, url, env, ctx);
         if (scanResponse) return scanResponse;
